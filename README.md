@@ -1,15 +1,15 @@
-<p align="center">
-  <img src="src-tauri/icons/icon.png" width="56" height="56" alt="">
-</p>
-
-<h1 align="center">Voltra</h1>
+<h1 align="center">
+  <img src="docs/images/voltra-banner.webp" width="1200" alt="Voltra">
+</h1>
 
 <p align="center">Open-source launcher for modded Minecraft Java Edition.</p>
 
 <p align="center">
   <a href="https://github.com/zwroe/Voltra/releases"><strong>Releases</strong></a>
   &nbsp;·&nbsp;
-  <a href="docs/guide.md">User and developer guide</a>
+  <a href="https://voltra.lol/docs/#install">User guide</a>
+  &nbsp;·&nbsp;
+  <a href="https://voltra.lol/docs/#build">Developer guide</a>
 </p>
 
 ![Voltra Library showing Minecraft instances and folders](docs/images/voltra-library.webp)
@@ -27,13 +27,13 @@
 
 ## Build from source
 
-On Windows, use Node.js 22 or newer, Rust with the MSVC toolchain, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/#windows).
+Use Node.js 22 or newer, Rust, and the [Tauri prerequisites for your operating system](https://v2.tauri.app/start/prerequisites/).
 
-```powershell
+```sh
 npm ci
 npm run tauri dev
 ```
 
-Run `npm run tauri build` to create the Windows installer.
+On Windows, run `npm run tauri build` to create the installer.
 
 [MIT License](LICENSE) · Independent launcher for Minecraft Java Edition.
