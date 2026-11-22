@@ -12,6 +12,8 @@
   <a href="https://voltra.lol/docs/#build">Developer guide</a>
 </p>
 
+Note: Voltra is currently awaiting approval from Microsoft for access to the Minecraft Services API. Microsoft account login and related features will be available once approval is granted.
+
 ![Voltra Library showing Minecraft instances and folders](docs/images/voltra-library.webp)
 
 ## Features
