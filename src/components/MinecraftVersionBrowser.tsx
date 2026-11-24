@@ -10,6 +10,26 @@ export function MinecraftVersionBrowser({ versions, value, onSelect, open, setOp
   setOpen: (open: boolean) => void;
   button: RefObject<HTMLButtonElement | null>;
 }) {
+  return <SearchableSelect label="Minecraft version" options={versions.filter(({ type }) => type === "release").map(({ id }) => ({ id }))}
+    value={value} onSelect={onSelect} open={open} setOpen={setOpen} button={button} placeholder="Find a release" />;
+}
+
+export function SearchableSelect({
+  label, options, value, onSelect, open, setOpen, button, placeholder, disabled, empty = "No matching versions.", allowCustom, searchable = true,
+}: {
+  label: string;
+  options: { id: string; label?: string }[];
+  value: string;
+  onSelect: (id: string) => void;
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  button: RefObject<HTMLButtonElement | null>;
+  placeholder: string;
+  disabled?: boolean;
+  empty?: string;
+  allowCustom?: boolean;
+  searchable?: boolean;
+}) {
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const panelId = useId();
@@ -17,12 +37,15 @@ export function MinecraftVersionBrowser({ versions, value, onSelect, open, setOp
   const list = useRef<HTMLUListElement>(null);
 
   const term = query.trim().toLowerCase();
-  const matches = open ? versions.filter(({ id, type }) => type === "release" && id.toLowerCase().includes(term)) : [];
+  const matches = open ? options.filter((option) => (option.label ?? option.id).toLowerCase().includes(term)) : [];
+  if (open && allowCustom && /^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,39}$/.test(query.trim()) && !options.some(({ id }) => id === query.trim())) {
+    matches.push({ id: query.trim() });
+  }
   const current = matches[active];
 
   useEffect(() => {
-    if (open) search.current?.focus();
-  }, [open]);
+    if (open) (searchable ? search.current : list.current)?.focus();
+  }, [open, searchable]);
 
   function resetResults() {
     setActive(0);
@@ -55,9 +78,16 @@ export function MinecraftVersionBrowser({ versions, value, onSelect, open, setOp
 
   return <div className="version-picker" onBlur={(event) => {
     if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+  }} onKeyDown={(event) => {
+    if (open && event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      button.current?.focus();
+    }
   }}>
-    <label id={`${panelId}-label`} htmlFor={`${panelId}-button`}>Minecraft version</label>
-    <button ref={button} id={`${panelId}-button`} className="version-picker-trigger" type="button"
+    <label id={`${panelId}-label`} htmlFor={`${panelId}-button`}>{label}</label>
+    <button ref={button} id={`${panelId}-button`} className="version-picker-trigger" type="button" disabled={disabled}
       aria-expanded={open} aria-controls={panelId} aria-labelledby={`${panelId}-label ${panelId}-value`}
       onClick={() => {
         if (!open) {
@@ -66,11 +96,11 @@ export function MinecraftVersionBrowser({ versions, value, onSelect, open, setOp
         }
         setOpen(!open);
       }}>
-      <span id={`${panelId}-value`}>{value || "Select a version"}</span><ChevronDown size={15} aria-hidden="true" />
+      <span id={`${panelId}-value`}>{options.find(({ id }) => id === value)?.label ?? (value || "Select a version")}</span><ChevronDown size={15} aria-hidden="true" />
     </button>
     <div id={panelId} className="version-picker-panel" hidden={!open}>
       {open && <>
-          <input ref={search} type="search" aria-label="Search Minecraft releases" placeholder="Find a release" value={query}
+          {searchable && <input ref={search} type="search" aria-label={"Search " + label.toLowerCase()} placeholder={placeholder} value={query}
             maxLength={96} onChange={(event) => { setQuery(event.target.value); resetResults(); }}
             onKeyDown={(event) => {
               if (event.key === "ArrowDown" && current) {
@@ -80,14 +110,14 @@ export function MinecraftVersionBrowser({ versions, value, onSelect, open, setOp
                 event.preventDefault();
                 if (current) select(current.id);
               }
-            }} />
-        {current ? <ul ref={list} className="version-list" role="listbox" tabIndex={0} aria-label="Minecraft releases"
+            }} />}
+        {current ? <ul ref={list} className="version-list" role="listbox" tabIndex={0} aria-label={label}
           aria-activedescendant={`${panelId}-option-${active}`} onKeyDown={handleListKey}>
-          {matches.map(({ id }, index) => <li key={id} id={`${panelId}-option-${index}`} className="version-option" role="option"
+          {matches.map(({ id, label: optionLabel }, index) => <li key={id} id={`${panelId}-option-${index}`} className="version-option" role="option"
             aria-selected={value === id} data-active={active === index} onMouseDown={(event) => event.preventDefault()} onClick={() => select(id)}>
-            <span>{id}</span>{value === id && <Check size={13} aria-hidden="true" />}
+            <span>{optionLabel ?? id}</span>{value === id && <Check size={13} aria-hidden="true" />}
           </li>)}
-        </ul> : <p className="version-picker-empty field-hint" role="status">No matching releases.</p>}
+        </ul> : <p className="version-picker-empty field-hint" role="status">{empty}</p>}
       </>}
     </div>
   </div>;

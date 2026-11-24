@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useEffect, useRef, useState } from "react";
 import { Copy, FolderOpen, Link2, Package, Play, Plus, RefreshCw, Server, Settings2, SlidersHorizontal, Square, Terminal, Trash2, Users } from "lucide-react";
 import { call, errorText, loaderNames, type Instance, type Loader, type Performance } from "../api";
@@ -274,10 +275,10 @@ function ServerProperties({ id, running, onSaved }: { id: string; running: boole
         {propertyFields.map(({ key, label, options, min, max, toggle }) => <label key={key} className={toggle ? "inline-checkbox" : undefined}>
           {toggle ? <><input type="checkbox" checked={values[key] === "true"} disabled={blocked}
             onChange={(event) => change(key, String(event.target.checked))} /> {label}</>
-            : <>{label}{options ? <select value={values[key]} disabled={blocked} onChange={(event) => change(key, event.target.value)}>
+            : <>{label}{options ? <Select value={values[key]} disabled={blocked} onValueChange={(value) => change(key, value)}>
               {!options.includes(values[key]) && <option value={values[key]}>{values[key]}</option>}
               {options.map((option) => <option key={option} value={option}>{option}</option>)}
-            </select> : <input type={min === undefined ? "text" : "number"} required={min !== undefined} min={min} max={max}
+            </Select> : <input type={min === undefined ? "text" : "number"} required={min !== undefined} min={min} max={max}
               maxLength={min === undefined ? 160 : undefined} value={values[key]} disabled={blocked} onChange={(event) => change(key, event.target.value)} />}</>}
         </label>)}
       </div>

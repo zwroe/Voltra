@@ -172,9 +172,11 @@ impl App {
 
     fn gate(&self, id: Uuid) -> Result<OwnedMutexGuard<()>> {
         self.instance_gate(id).try_lock_owned().map_err(|_| {
-            anyhow::anyhow!(
-                "This instance is busy. Close Minecraft or wait for the current change to finish."
-            )
+            if self.0.running.lock().expect("running lock").contains_key(&id) {
+                anyhow::anyhow!("Close this instance's Minecraft session before making changes.")
+            } else {
+                anyhow::anyhow!("Voltra is finishing another operation on this instance. Try again when it completes.")
+            }
         })
     }
 
@@ -448,18 +450,21 @@ impl App {
             }
         };
         let total = previous_playtime.saturating_add(clock.elapsed().as_secs());
-        if let Some(game) = self.0.running.lock().expect("running lock").get_mut(&id) {
-            game.clock = None;
-            game.playtime_seconds = total;
-            game.discord_game = None;
-        }
+        self.0.running.lock().expect("running lock").remove(&id);
         self.refresh_discord();
         self.save_playtime(id, started_at, total).await;
         record.finish(total.saturating_sub(previous_playtime), &exit);
         self.capture_play_history(id, &mut visited).await;
-        for logger in consoles {
-            if let Ok(Err(error)) = logger.await {
-                tracing::warn!(instance = %id, %error, "Could not write Minecraft console output");
+        let drain_until = tokio::time::Instant::now() + Duration::from_secs(2);
+        for mut logger in consoles {
+            match tokio::time::timeout_at(drain_until, &mut logger).await {
+                Ok(Ok(Err(error))) => tracing::warn!(instance = %id, %error, "Could not write Minecraft console output"),
+                Err(_) => {
+                    // A subprocess can inherit the console pipes and keep them open after Minecraft exits.
+                    logger.abort();
+                    let _ = logger.await;
+                }
+                _ => (),
             }
         }
         if let Err(error) = self
@@ -491,7 +496,6 @@ impl App {
         {
             tracing::warn!(instance = %id, %error, "Post-exit hook failed");
         }
-        self.0.running.lock().expect("running lock").remove(&id);
         drop(prepared);
         match exit {
             Ok(status) if status.success() => {
@@ -676,6 +680,7 @@ impl App {
         storage::check_filename(&file.filename)?;
         let stage = tempfile::tempdir_in(self.0.store.root.join("cache"))?;
         let archive = stage.path().join(file.filename);
+        let icon_url = file.icon_url;
         downloads::batch(
             &self.0.client,
             vec![downloads::Download {
@@ -717,9 +722,17 @@ impl App {
                 let mut data = fs::File::open(&archive)?;
                 std::io::copy(&mut data, temp.as_file_mut())?;
                 ensure!(!cancel.is_cancelled(), "Installation cancelled.");
-                temp.persist_noclobber(target)
+                temp.persist_noclobber(&target)
                     .map_err(|error| error.error)
                     .context("A file with this name may already be installed.")?;
+                if matches!(kind, Kind::Resourcepack | Kind::Shader) {
+                    if let Some(url) = icon_url {
+                        let label = kind.folder().expect("resource or shader pack folder");
+                        if let Err(error) = content::save_icon(&store, id, label, &target, url) {
+                            tracing::warn!(%error, "Could not save the pack icon");
+                        }
+                    }
+                }
                 Ok(())
             })
             .await?;
@@ -1112,7 +1125,11 @@ async fn install_java(app: State<'_, App>, major: u32) -> Reply<Uuid> {
 
 #[tauri::command]
 async fn create_instance(app: State<'_, App>, options: InstanceOptions) -> Reply<InstanceView> {
-    reply(app.local(move |store| store.create(options)).await)
+    reply(async {
+        minecraft::validate_loader(&app.inner().0.client, options.loader, &options.minecraft_version,
+            options.loader_version.as_deref()).await?;
+        app.local(move |store| store.create(options)).await
+    }.await)
 }
 
 #[tauri::command]
@@ -1121,7 +1138,19 @@ async fn update_instance(
     id: Uuid,
     options: InstanceOptions,
 ) -> Reply<InstanceView> {
-    reply(app.change(id, move |store| store.update(id, options)).await)
+    reply(async {
+        let guard = app.gate(id)?;
+        let current = app.local(move |store| store.instance(id)).await?.options;
+        if current.loader != options.loader || current.minecraft_version != options.minecraft_version
+            || current.loader_version != options.loader_version {
+            minecraft::validate_loader(&app.inner().0.client, options.loader, &options.minecraft_version,
+                options.loader_version.as_deref()).await?;
+        }
+        app.local(move |store| {
+            let _guard = guard;
+            store.update(id, options)
+        }).await
+    }.await)
 }
 
 #[tauri::command]
@@ -1623,8 +1652,17 @@ async fn installed_mod_projects(app: State<'_, App>, id: Uuid) -> Reply<Vec<(Pla
 async fn installed_mod_artwork(
     app: State<'_, App>,
     id: Uuid,
+    group: mod_artwork::Group,
+    files: Vec<String>,
 ) -> Reply<HashMap<String, providers::ModrinthArtwork>> {
-    reply(mod_artwork::list(&app.0.client, app.0.store.clone(), id).await)
+    reply(mod_artwork::list(&app.0.client, app.0.store.clone(), id, group, files).await)
+}
+
+#[tauri::command]
+async fn installed_content_icons(
+    app: State<'_, App>, id: Uuid, group: mod_artwork::Group, files: Vec<String>,
+) -> Reply<HashMap<String, String>> {
+    reply(app.local(move |store| mod_artwork::embedded_icons(&store, id, group, files)).await)
 }
 
 #[tauri::command]
@@ -1719,10 +1757,10 @@ async fn preview_mod_updates(
     app: State<'_, App>,
     id: Uuid,
     file: Option<String>,
+    version: Option<String>,
 ) -> Reply<mods::UpdatePreview> {
     reply(
         async {
-            let _guard = app.gate(id)?;
             let instance = app.local(move |store| store.instance(id)).await?;
             let result = mods::preview_updates(
                 &app.0.client,
@@ -1730,6 +1768,7 @@ async fn preview_mod_updates(
                 &app.0.store,
                 instance,
                 file,
+                version,
             )
             .await?;
             let token = Uuid::new_v4();
@@ -1743,6 +1782,31 @@ async fn preview_mod_updates(
         }
         .await,
     )
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModVersions {
+    current: String,
+    project: String,
+    platform: Platform,
+    versions: Vec<providers::ModVersionChoice>,
+}
+
+#[tauri::command]
+async fn list_mod_update_versions(app: State<'_, App>, id: Uuid, file: String) -> Reply<ModVersions> {
+    reply(async {
+        let instance = app.local(move |store| store.instance(id)).await?;
+        let target = mods::update_target(&app.0.client, &app.0.store, &instance, &file).await?;
+        let provider = providers::provider(target.platform, &app.0.client, &app.0.private_client).await?;
+        let versions = provider.mod_versions(&target.project, &instance.options).await?;
+        Ok(ModVersions { current: target.version, project: target.project, platform: target.platform, versions })
+    }.await)
+}
+
+#[tauri::command]
+async fn mod_version_changelog(app: State<'_, App>, project: String, version: String) -> Reply<String> {
+    reply(providers::curseforge_changelog(&app.0.private_client, &project, &version).await)
 }
 
 #[tauri::command]
@@ -1849,7 +1913,7 @@ async fn undo_mod_change(app: State<'_, App>, id: Uuid, entry: Uuid, change: usi
 }
 
 #[tauri::command]
-async fn toggle_mod(app: State<'_, App>, id: Uuid, file: String, enabled: bool) -> Reply<()> {
+async fn toggle_mod(app: State<'_, App>, id: Uuid, file: String, enabled: bool) -> Reply<Vec<mods::ModToggle>> {
     reply(
         app.change(id, move |store| mods::toggle(&store, id, &file, enabled))
             .await,
@@ -1862,6 +1926,22 @@ async fn remove_mod(app: State<'_, App>, id: Uuid, file: String) -> Reply<()> {
         app.change(id, move |store| mods::remove(&store, id, &file))
             .await,
     )
+}
+
+#[tauri::command]
+async fn toggle_selected_mods(app: State<'_, App>, id: Uuid, files: Vec<String>, enabled: bool) -> Reply<Vec<mods::ModToggle>> {
+    reply(app.change(id, move |store| mods::toggle_many(&store, id, &files, enabled)).await)
+}
+
+#[tauri::command]
+async fn remove_selected_content(
+    app: State<'_, App>, id: Uuid, mods: Vec<String>, resource_packs: Vec<String>, shaders: Vec<String>,
+) -> Reply<()> {
+    reply(app.change(id, move |store| {
+        let mut packs = content::removal_paths(&store, id, content::Kind::ResourcePacks, &resource_packs)?;
+        packs.extend(content::removal_paths(&store, id, content::Kind::Shaders, &shaders)?);
+        mods::remove_selected(&store, id, &mods, packs)
+    }).await)
 }
 
 #[tauri::command]
@@ -2148,6 +2228,16 @@ async fn list_skins(app: State<'_, App>) -> Reply<Vec<media::Skin>> {
 }
 
 #[tauri::command]
+async fn current_account_skin(app: State<'_, App>, account_id: Uuid) -> Reply<Option<auth::AccountSkin>> {
+    reply(app.0.auth.current_skin(account_id).await)
+}
+
+#[tauri::command]
+async fn set_skin_variant(app: State<'_, App>, id: String, variant: media::Variant) -> Reply<media::Skin> {
+    reply(app.local(move |store| media::set_skin_variant(&store, &id, variant)).await)
+}
+
+#[tauri::command]
 async fn read_skin(app: State<'_, App>, id: String) -> Reply<tauri::ipc::Response> {
     reply(
         app.local(move |store| {
@@ -2328,17 +2418,22 @@ fn main() {
             installed_mods,
             installed_mod_projects,
             installed_mod_artwork,
+            installed_content_icons,
             set_mod_side,
             export_mod_folders,
             install_mod,
             update_mods,
             preview_mod_updates,
+            list_mod_update_versions,
+            mod_version_changelog,
             mod_filter_data,
             apply_mod_preview,
             mod_history,
             undo_mod_change,
             toggle_mod,
             remove_mod,
+            toggle_selected_mods,
+            remove_selected_content,
             read_diagnostics,
             diagnostic_share_summary,
             game_performance,
@@ -2373,6 +2468,8 @@ fn main() {
             read_screenshot,
             open_screenshot,
             list_skins,
+            current_account_skin,
+            set_skin_variant,
             read_skin,
             import_skin,
             apply_skin,

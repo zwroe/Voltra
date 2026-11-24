@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useState } from "react";
 import { Archive, GitCompare, History } from "lucide-react";
 import { call, displayDate, errorText, type Backup } from "../api";
@@ -59,11 +60,11 @@ function Snapshots({ id, locked }: { id: string; locked: boolean }) {
     {history.value && !items.length && <div className="empty"><Archive /><h3>No pack snapshots yet</h3><p>Voltra creates snapshots before changing mods. You can also save one here.</p></div>}
     {current && <section className="panel detail-panel">
       <p>{items.length} snapshots · {formatPackSize(items.reduce((total, item) => total + item.bytes, 0))}</p>
-      <div className="form-grid"><label>Snapshot<select value={current.id} onChange={(event) => { select(event.target.value); setOther(null); }}>
+      <div className="form-grid"><label>Snapshot<Select value={current.id} onValueChange={(value) => { select(value); setOther(null); }}>
         {items.map((item) => <option key={item.id} value={item.id}>{displayDate(item.createdAt)} · {item.minecraftVersion} · {formatPackSize(item.bytes)}</option>)}
-      </select></label><label>Compare with<select value={other ?? ""} onChange={(event) => setOther(event.target.value || null)}>
+      </Select></label><label>Compare with<Select value={other ?? ""} onValueChange={(value) => setOther(value || null)}>
         <option value="">Current files</option>{items.filter((item) => item.id !== current.id).map((item) => <option value={item.id} key={item.id}>{displayDate(item.createdAt)}</option>)}
-      </select></label></div>
+      </Select></label></div>
       <div className="actions-wrap"><Button onClick={() => { if (showDiff) comparison.refresh(); setShowDiff(true); }}><GitCompare /> Compare files</Button>
         <Button disabled={locked || busy} onClick={() => { setError(""); confirm("restore"); }}>Restore snapshot</Button></div>
       {showDiff && <><ReadState query={comparison} label="Comparing file checksums…" />{comparison.value && <PackDifferences changes={comparison.value} />}</>}

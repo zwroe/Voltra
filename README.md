@@ -12,9 +12,19 @@
   <a href="https://voltra.lol/docs/#build">Developer guide</a>
 </p>
 
-Note: Voltra is currently awaiting approval from Microsoft for access to the Minecraft Services API. Microsoft account login and related features will be available once approval is granted.
-
 ![Voltra Library showing Minecraft instances and folders](docs/images/voltra-library.webp)
+
+## Install
+
+Get the installer for your system from [GitHub Releases](https://github.com/zwroe/Voltra/releases).
+
+| System | Download |
+| --- | --- |
+| Windows x64 | `-windows-x64-setup.exe` |
+| macOS | `-macos-arm64.dmg` for Apple silicon or `-macos-x64.dmg` for Intel |
+| Linux x64 | `-linux-x64.deb` for Debian and Ubuntu, or the `.AppImage` |
+
+macOS builds are ad hoc signed and may need to be allowed in **System Settings → Privacy & Security** the first time they open. On Linux, make the AppImage executable before opening it.
 
 ## Features
 
@@ -36,6 +46,8 @@ npm ci
 npm run tauri dev
 ```
 
-On Windows, run `npm run tauri build` to create the installer.
+Build an installer on its target OS with `npm run tauri -- build --bundles nsis` on Windows, `npm run tauri -- build --bundles dmg` on macOS, or `npm run tauri -- build --bundles deb,appimage` on Linux.
+
+For a GitHub release, set the approved Microsoft application's client ID as the repository Actions secret `VOLTRA_MICROSOFT_CLIENT_ID`. Push a version tag matching `src-tauri/tauri.conf.json` (for example, `v1.0.0`). The release workflow builds and tests the installers, then attaches them and their SHA-256 checksums to a draft release.
 
 [MIT License](LICENSE) · Independent launcher for Minecraft Java Edition.

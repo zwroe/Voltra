@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useEffect, useState, type FormEvent } from "react";
 import { Check, Coffee, FolderOpen, HardDrive, KeyRound, LoaderCircle, Monitor, Radio, Search, SlidersHorizontal, Terminal, UserRound, X } from "lucide-react";
 import { call, errorText, type Accounts, type JavaVersion, type Settings, type Theme } from "../api";
@@ -151,12 +152,12 @@ export function SettingsPage({ onSignIn, focusSection, onFocused }: {
           {tab === "general" && <section className="panel settings-panel">
             <div className="settings-title"><Monitor /><div><h2>Appearance</h2></div></div>
             <div className="form-grid">
-              <label>Appearance<select value={draft.theme} onChange={(event) => setDraft({ ...draft, theme: event.target.value as Theme })}>
+              <label>Appearance<Select value={draft.theme} onValueChange={(value) => setDraft({ ...draft, theme: value as Theme })}>
                 <option value="dark">Dark</option><option value="light">Light</option><option value="system">Match the system</option>
-              </select></label>
-              <label>UI scale<select value={draft.uiScale ?? 115} onChange={(event) => setDraft({ ...draft, uiScale: Number(event.target.value) })}>
+              </Select></label>
+              <label>UI scale<Select value={draft.uiScale ?? 115} onValueChange={(value) => setDraft({ ...draft, uiScale: Number(value) })}>
                 {Array.from({ length: 13 }, (_, index) => 90 + index * 5).map((scale) => <option value={scale} key={scale}>{scale}%</option>)}
-              </select></label>
+              </Select></label>
             </div>
             <label className="inline-checkbox">
               <input type="checkbox" checked={draft.animations !== false}

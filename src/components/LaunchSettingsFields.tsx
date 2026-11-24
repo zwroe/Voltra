@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useEffect, useState } from "react";
 import { RotateCcw } from "lucide-react";
 import type { EnvironmentVariable, GameWindow, LaunchHooks } from "../api";
@@ -24,11 +25,11 @@ export function WindowFields({ value, defaults, onChange }: { value: GameWindow;
   return <div className="launch-field-stack">
     <div className="launch-field">
       <div><label htmlFor="game-fullscreen">Fullscreen at launch</label><p className="field-hint">Controls the fullscreen option when Minecraft starts.</p></div>
-      <select id="game-fullscreen" value={value.fullscreen == null ? "" : String(value.fullscreen)}
-        onChange={(event) => onChange({ ...value, fullscreen: event.target.value === "" ? null : event.target.value === "true" })}>
+      <Select id="game-fullscreen" value={value.fullscreen == null ? "" : String(value.fullscreen)}
+        onValueChange={(nextValue) => onChange({ ...value, fullscreen: nextValue === "" ? null : nextValue === "true" })}>
         <option value="">{defaults ? (defaults.fullscreen == null ? "Use launcher default" : "Default (" + (defaults.fullscreen ? "on" : "off") + ")") : "Use Minecraft setting"}</option>
         <option value="true">On</option><option value="false">Off</option>
-      </select>
+      </Select>
     </div>
     {(["width", "height"] as const).map((field) => <div className="launch-field" key={field}>
       <div><label htmlFor={"game-" + field}>{field === "width" ? "Window width" : "Window height"}</label><p className="field-hint">Pixels</p></div>

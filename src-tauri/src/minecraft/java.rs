@@ -126,10 +126,12 @@ pub async fn install(client: &Client, store: &Store, major: u32, job: &Job) -> R
         (8..=99).contains(&major),
         "Choose an available Java release."
     );
-    ensure!(
-        cfg!(windows),
-        "Automatic Java installation currently supports Windows. Install Java {major} locally."
-    );
+    let (os, suffix) = match env::consts::OS {
+        "windows" => ("windows", ".zip"),
+        "macos" => ("mac", ".tar.gz"),
+        "linux" => ("linux", ".tar.gz"),
+        _ => bail!("Install Java {major} locally and select it in Settings."),
+    };
     let arch = match env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "aarch64",
@@ -147,21 +149,30 @@ pub async fn install(client: &Client, store: &Store, major: u32, job: &Job) -> R
     job.stage("Finding a Java runtime", 0);
     let mut selected = None;
     for kind in ["jre", "jdk"] {
-        let endpoint = format!("https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={arch}&image_type={kind}&os=windows&vendor=eclipse");
+        let endpoint = format!("https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={arch}&image_type={kind}&os={os}&vendor=eclipse");
         let response = client.get(endpoint).send().await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             continue;
         }
         let assets: Vec<Value> = response.error_for_status()?.json().await?;
-        if let Some(asset) = assets.first() {
-            selected = Some(asset["binary"]["package"].clone());
+        if let Some(package) =
+            assets
+                .iter()
+                .map(|asset| &asset["binary"]["package"])
+                .find(|package| {
+                    package["name"]
+                        .as_str()
+                        .is_some_and(|name| name.ends_with(suffix))
+                })
+        {
+            selected = Some(package.clone());
             break;
         }
     }
-    let package = selected.with_context(|| format!("Adoptium has no Windows {arch} runtime for Java {major}. Set a local path in Settings."))?;
+    let package = selected.with_context(|| format!("Adoptium has no Java {major} runtime for {os} ({arch}). Install Java locally and select it in Settings."))?;
     tokio::fs::create_dir_all(&root).await?;
     let work = tempfile::tempdir_in(&root)?;
-    let archive = work.path().join("runtime.zip");
+    let archive = work.path().join(format!("runtime{suffix}"));
     let download = Download {
         url: package["link"]
             .as_str()
@@ -179,12 +190,16 @@ pub async fn install(client: &Client, store: &Store, major: u32, job: &Job) -> R
     downloads::batch(client, vec![download], 1, job, "Downloading Java").await?;
     job.stage("Extracting Java", 0);
     let staged = work.path().join("runtime");
-    let directory = staged.clone();
-    let cancel = job.cancel.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::archive::extract_zip(&archive, &directory, &[], &cancel)
-    })
-    .await??;
+    if os == "windows" {
+        let directory = staged.clone();
+        let cancel = job.cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::archive::extract_zip(&archive, &directory, &[], &cancel)
+        })
+        .await??;
+    } else {
+        extract_runtime_tar(&archive, &staged, &job.cancel).await?;
+    }
     let path = find_binary(&staged).context("Downloaded Java archive contains no executable.")?;
     let java = inspect(path.clone()).await?;
     ensure!(
@@ -213,6 +228,36 @@ pub async fn install(client: &Client, store: &Store, major: u32, job: &Job) -> R
     Ok(target.join(relative))
 }
 
+async fn extract_runtime_tar(
+    archive: &Path,
+    directory: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    tokio::fs::create_dir(directory).await?;
+    let mut tar = Command::new("tar");
+    tar.arg("--no-same-owner")
+        .arg("--no-same-permissions")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(directory)
+        .env_remove("TAR_OPTIONS")
+        .kill_on_drop(true);
+    let output = tokio::select! {
+        _ = cancel.cancelled() => bail!("Cancelled."),
+        result = tokio::time::timeout(Duration::from_secs(120), tar.output()) => result
+            .context("Extracting the Java runtime timed out.")?
+            .context("Could not start tar to extract the Java runtime.")?,
+    };
+    let error = String::from_utf8_lossy(&output.stderr);
+    ensure!(
+        output.status.success(),
+        "Could not extract the Java runtime: {}",
+        error.trim()
+    );
+    Ok(())
+}
+
 fn executable() -> &'static str {
     if cfg!(windows) {
         "java.exe"
@@ -222,15 +267,21 @@ fn executable() -> &'static str {
 }
 
 fn find_binary(directory: &Path) -> Option<PathBuf> {
-    let direct = directory.join("bin").join(executable());
-    if direct.is_file() {
+    fn at_root(root: &Path) -> Option<PathBuf> {
+        [
+            root.join("bin").join(executable()),
+            root.join("Contents/Home/bin").join(executable()),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+    }
+    if let Some(direct) = at_root(directory) {
         return Some(direct);
     }
     std::fs::read_dir(directory)
         .ok()?
         .flatten()
-        .map(|entry| entry.path().join("bin").join(executable()))
-        .find(|path| path.is_file())
+        .find_map(|entry| at_root(&entry.path()))
 }
 
 fn java_candidates(managed: &Path) -> Vec<PathBuf> {
@@ -260,6 +311,13 @@ fn java_candidates(managed: &Path) -> Vec<PathBuf> {
         }
     }
     push_roots(Path::new("/usr/lib/jvm"));
+    #[cfg(target_os = "macos")]
+    {
+        push_roots(Path::new("/Library/Java/JavaVirtualMachines"));
+        if let Some(home) = env::var_os("HOME") {
+            push_roots(&PathBuf::from(home).join("Library/Java/JavaVirtualMachines"));
+        }
+    }
     if let Some(home) = env::var_os("JAVA_HOME") {
         candidates.push(PathBuf::from(home).join("bin").join(executable()));
     }
@@ -276,6 +334,21 @@ fn java_candidates(managed: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_linux_runtime_and_macos_bundle_binaries() -> Result<()> {
+        for layout in ["runtime/bin", "runtime/Contents/Home/bin"] {
+            let archive = tempfile::tempdir()?;
+            let bin = archive.path().join(layout);
+            std::fs::create_dir_all(&bin)?;
+            let java = bin.join(executable());
+            std::fs::write(&java, [])?;
+            assert_eq!(find_binary(archive.path()), Some(java));
+        }
+        Ok(())
+    }
+
     #[test]
     fn reports_java_version_for_legacy_and_modern_output() {
         let regex = regex::Regex::new(r#"(?m)^(?:openjdk|java) version "(?:1\.)?(\d+)"#).unwrap();

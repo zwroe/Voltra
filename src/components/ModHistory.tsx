@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ArrowRight, History, LoaderCircle, RotateCcw } from "lucide-react";
 import { call, displayDate, errorText, type ModHistoryEntry, type ModUpdatePreview } from "../api";
 import { useLauncher } from "../store";
+import { ModVersionChooser, type VersionChoice } from "./ModVersionChooser";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
 
@@ -80,6 +81,15 @@ export function ModHistory({ id, locked }: { id: string; locked: boolean }) {
 export function ModUpdateDialog({ id, file, title, locked, onClose }: {
   id: string; file: string | null; title?: string; locked: boolean; onClose: () => void;
 }) {
+  const [chosen, setChosen] = useState<VersionChoice | null>(null);
+  if (file && !chosen) return <ModVersionChooser id={id} file={file} title={title} locked={locked} onClose={onClose} onSelect={setChosen} />;
+  return <UpdatePreviewDialog id={id} file={file} title={title} version={chosen} locked={locked}
+    onBack={file ? () => setChosen(null) : undefined} onClose={onClose} />;
+}
+
+function UpdatePreviewDialog({ id, file, title, version, locked, onBack, onClose }: {
+  id: string; file: string | null; title?: string; version: VersionChoice | null; locked: boolean; onBack?: () => void; onClose: () => void;
+}) {
   const [preview, setPreview] = useState<ModUpdatePreview | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<"apply" | "test" | null>(null);
@@ -88,13 +98,13 @@ export function ModUpdateDialog({ id, file, title, locked, onClose }: {
     let live = true;
     setPreview(null);
     setError("");
-    call<ModUpdatePreview>("preview_mod_updates", { id, file }).then((data) => {
+    call<ModUpdatePreview>("preview_mod_updates", { id, file, version: version?.id ?? null }).then((data) => {
       if (live) setPreview(data);
     }).catch((reason) => {
       if (live) setError(errorText(reason));
     });
     return () => { live = false; };
-  }, [id, file, retry]);
+  }, [id, file, version, retry]);
 
   async function apply(testCopy: boolean) {
     if (!preview?.changes.length || locked || busy) return;
@@ -129,7 +139,7 @@ export function ModUpdateDialog({ id, file, title, locked, onClose }: {
         </p></div>
       </li>)}</ul>)}
     <div className="dialog-actions">
-      <Button variant="ghost" disabled={!!busy} onClick={onClose}>{preview?.changes.length ? "Cancel" : "Close"}</Button>
+      <Button variant="ghost" disabled={!!busy} onClick={onBack ?? onClose}>{onBack ? "Back to versions" : preview?.changes.length ? "Cancel" : "Close"}</Button>
       {!!preview?.changes.length && <>
         <Button disabled={locked || !!busy || !!error} onClick={() => void apply(true)}>{busy === "test" ? "Creating copy…" : "Test in a copy"}</Button>
         <Button variant="primary" disabled={locked || !!busy || !!error} onClick={() => void apply(false)}>{busy === "apply" ? "Starting…" : "Apply updates"}</Button>

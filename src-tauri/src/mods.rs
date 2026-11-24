@@ -343,11 +343,7 @@ fn override_path(store: &Store, id: Uuid) -> PathBuf {
 }
 
 fn side_key(file: &str, entry: Option<&ManagedMod>) -> String {
-    let name = if disabled(file) {
-        &file[..file.len() - ".disabled".len()]
-    } else {
-        file
-    };
+    let name = enabled_filename(file);
     entry.map_or_else(
         || format!("file:{name}"),
         |item| format!("{}:{}", item.platform.label(), item.project),
@@ -355,13 +351,11 @@ fn side_key(file: &str, entry: Option<&ManagedMod>) -> String {
 }
 
 pub fn set_side(store: &Store, id: Uuid, file: &str, side: Option<ModSide>) -> Result<()> {
-    check_filename(file)?;
-    ensure!(is_mod(file), "Choose an installed mod.");
     let directory = store.game_dir(id)?.join("mods");
     check_directory(&directory)?;
-    regular_file(&directory.join(file))?;
+    let file = current_mod_file(&directory, file)?;
     let mods = installed(store, id)?;
-    let key = side_key(file, mods.iter().find(|item| item.file == file));
+    let key = side_key(&file, mods.iter().find(|item| item.file == file));
     let path = override_path(store, id);
     let mut overrides: HashMap<String, ModSide> = crate::storage::read_default(&path)?;
     if let Some(side) = side {
@@ -457,6 +451,36 @@ fn disabled(file: &str) -> bool {
     file.to_ascii_lowercase().ends_with(".disabled")
 }
 
+fn enabled_filename(file: &str) -> &str {
+    if disabled(file) {
+        &file[..file.len() - ".disabled".len()]
+    } else {
+        file
+    }
+}
+
+fn current_mod_file(directory: &Path, file: &str) -> Result<String> {
+    check_filename(file)?;
+    ensure!(is_mod(file), "Choose a mod JAR.");
+    let alternate = if disabled(file) {
+        enabled_filename(file).to_owned()
+    } else {
+        format!("{file}.disabled")
+    };
+    for name in [file, &alternate] {
+        let path = directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                ensure!(metadata.is_file() && !crate::storage::linked(&metadata), "The mod must be a regular file.");
+                return Ok(name.to_owned());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("Opening mod {name}")),
+        }
+    }
+    bail!("The mod file {file} is no longer in this instance. Refresh Content and try again.")
+}
+
 pub fn rename_local(store: &Store, id: Uuid, file: &str, name: &str) -> Result<()> {
     check_filename(file)?;
     check_filename(name)?;
@@ -518,56 +542,78 @@ fn record_removals(
     Ok(())
 }
 
-pub fn toggle(store: &Store, id: Uuid, file: &str, enabled: bool) -> Result<()> {
-    check_filename(file)?;
-    ensure!(is_mod(file), "Choose a mod JAR.");
+#[derive(Debug, Serialize)]
+pub struct ModToggle {
+    requested: String,
+    file: String,
+    enabled: bool,
+}
+
+pub fn toggle(store: &Store, id: Uuid, file: &str, enabled: bool) -> Result<Vec<ModToggle>> {
+    toggle_many(store, id, &[file.to_owned()], enabled)
+}
+
+pub fn toggle_many(store: &Store, id: Uuid, files: &[String], enabled: bool) -> Result<Vec<ModToggle>> {
     let dir = store.game_dir(id)?.join("mods");
     check_directory(&dir)?;
-    regular_file(&dir.join(file))?;
-    if disabled(file) != enabled {
-        return Ok(());
-    }
-    let new = if enabled {
-        file[..file.len() - ".disabled".len()].to_owned()
-    } else {
-        format!("{file}.disabled")
-    };
-    ensure!(
-        !list_files(&dir)?
-            .iter()
-            .any(|file| file.eq_ignore_ascii_case(&new)),
-        "A mod at the destination already exists."
-    );
+    let mut destinations: HashSet<_> = list_files(&dir)?.into_iter().map(|file| file.to_ascii_lowercase()).collect();
     let mut state = load_state(store, id)?;
-    let source = dir.join(file);
-    let destination = dir.join(&new);
-    store.snapshot_content(id)?;
-    rename_absent(&source, &destination)?;
-    if let Some(item) = state.mods.iter_mut().find(|item| item.file == file) {
-        item.file = new;
-        if let Err(error) = atomic_json(&registry(store, id), &state) {
-            fs::rename(destination, source)
-                .context("Restoring original mod name after metadata update failed")?;
-            return Err(error);
+    let mut writes = Vec::new();
+    let mut changes = Vec::new();
+    let mut visited = HashSet::new();
+    for requested in files {
+        let file = current_mod_file(&dir, requested)?;
+        if !visited.insert(file.clone()) {
+            continue;
         }
+        if disabled(&file) != enabled {
+            changes.push(ModToggle { requested: requested.clone(), file, enabled });
+            continue;
+        }
+        let new = if enabled {
+            enabled_filename(&file).to_owned()
+        } else {
+            format!("{file}.disabled")
+        };
+        ensure!(destinations.insert(new.to_ascii_lowercase()), "The mods folder already contains {new}.");
+        writes.push((dir.join(&file), dir.join(&new)));
+        if let Some(item) = state.mods.iter_mut().find(|item| item.file == file) {
+            item.file = new.clone();
+        }
+        changes.push(ModToggle { requested: requested.clone(), file: new, enabled });
     }
-    Ok(())
+    if !writes.is_empty() {
+        let work = tempfile::tempdir_in(store.instance_dir(id))?;
+        apply_writes(store, id, state, writes, work)?;
+    }
+    Ok(changes)
 }
 
 pub fn remove(store: &Store, id: Uuid, file: &str) -> Result<()> {
-    check_filename(file)?;
-    ensure!(is_mod(file), "Choose a mod JAR.");
+    remove_selected(store, id, &[file.to_owned()], Vec::new())
+}
+
+pub fn remove_selected(store: &Store, id: Uuid, files: &[String], packs: Vec<PathBuf>) -> Result<()> {
+    let mut files = files.to_owned();
+    files.sort_unstable();
+    files.dedup();
+    if files.is_empty() && packs.is_empty() { return Ok(()); }
     let folder = store.game_dir(id)?.join("mods");
-    check_directory(&folder)?;
-    let path = folder.join(file);
-    regular_file(&path)?;
+    if !files.is_empty() { check_directory(&folder)?; }
+    for file in &files {
+        ensure!(
+            current_mod_file(&folder, file)? == *file,
+            "The mod {file} changed. Refresh Content and review your selection."
+        );
+    }
     let instance = store.instance(id)?;
     let backup = store.snapshot_content(id)?;
     let mut state = load_state(store, id)?;
-    record_removals(store, &instance, backup, &[file.into()], &mut state)?;
+    if !files.is_empty() { record_removals(store, &instance, backup, &files, &mut state)?; }
     let work = tempfile::tempdir_in(store.instance_dir(id))?;
-    let previous = work.path().join("removed.jar");
-    apply_writes(store, id, state, vec![(path, previous)], work)
+    let writes = files.iter().map(|file| folder.join(file)).chain(packs)
+        .enumerate().map(|(index, path)| (path, work.path().join(index.to_string()))).collect();
+    apply_writes(store, id, state, writes, work)
 }
 
 pub fn enable_files(store: &Store, id: Uuid, files: &[String]) -> Result<()> {
@@ -605,6 +651,7 @@ pub fn enable_files(store: &Store, id: Uuid, files: &[String]) -> Result<()> {
 pub enum Operation {
     Install(Platform, String),
     Update(Option<String>),
+    Version(Platform, String, String),
 }
 
 type Plan = Vec<(Platform, ModFile)>;
@@ -613,6 +660,7 @@ type Plan = Vec<(Platform, ModFile)>;
 pub struct PreparedUpdate {
     pub instance_id: Uuid,
     old: Vec<ManagedMod>,
+    adopted: Option<ManagedMod>,
     plan: Plan,
     files: Vec<String>,
     revisions: Vec<Revision>,
@@ -649,6 +697,7 @@ impl PreparedUpdate {
                     let previous = self
                         .old
                         .iter()
+                        .chain(self.adopted.iter())
                         .find(|entry| entry.platform == *platform && entry.project == file.project);
                     UpdateChange {
                         title: file.title.clone(),
@@ -695,29 +744,83 @@ pub async fn preview_updates(
     store: &Store,
     instance: Instance,
     file: Option<String>,
+    version: Option<String>,
 ) -> Result<PreparedUpdate> {
     ensure!(
         instance.options.loader != Loader::Vanilla,
         "Choose a modded instance first."
     );
     let old = installed(store, instance.id)?;
-    if let Some(name) = &file {
-        ensure!(
-            old.iter().any(|item| &item.file == name),
-            "This catalog mod is no longer installed."
-        );
-    }
-    let plan = resolve(
+    let directory = store.game_dir(instance.id)?.join("mods");
+    let file = file.map(|file| current_mod_file(&directory, &file)).transpose()?;
+    let files = list_files(&directory)?;
+    let mut adopted = None;
+    let mut local_revision = None;
+    let operation = if let Some(name) = &file {
+        let target = if let Some(target) = old.iter().find(|item| &item.file == name) {
+            target.clone()
+        } else {
+            let target = update_target(client, store, &instance, name).await?;
+            ensure!(!old.iter().any(|item| item.platform == target.platform && item.project == target.project),
+                "This project is already managed in this instance.");
+            let source_dir = directory.clone();
+            let source_file = target.file.clone();
+            let expected_hash = target.export_sha512.clone();
+            local_revision = Some(tokio::task::spawn_blocking(move || {
+                let revision = Revision::read(&source_dir, &source_file, None)?;
+                let hash = crate::mod_artwork::file_hash(&source_dir.join(&source_file))?;
+                ensure!(expected_hash.as_deref() == Some(hash.as_str()), "The local mod changed during lookup. Try again.");
+                Ok::<_, anyhow::Error>(revision)
+            }).await??);
+            adopted = Some(target.clone());
+            target
+        };
+        match version {
+            Some(version) => Operation::Version(target.platform, target.project, version),
+            None => Operation::Update(Some(target.file)),
+        }
+    } else {
+        Operation::Update(None)
+    };
+    let mut installed = old.clone();
+    installed.extend(adopted.iter().cloned());
+    let mut plan = resolve(
         client,
         private_client,
         &instance,
-        &old,
-        Operation::Update(file),
+        &installed,
+        operation,
     )
     .await?;
-    let directory = store.game_dir(instance.id)?.join("mods");
-    let files = list_files(&directory)?;
-    let revisions = plan
+    if adopted.as_ref().is_some_and(|entry| !plan.iter().any(|(platform, file)| {
+        *platform == entry.platform && file.project == entry.project
+    })) {
+        adopted = None;
+    }
+    let managed: HashSet<_> = old.iter().map(|item| item.file.to_ascii_lowercase()).collect();
+    let mut local_dependencies = Vec::new();
+    for (platform, file) in &plan {
+        if old.iter().chain(adopted.iter()).any(|item| item.platform == *platform && item.project == file.project)
+            || managed.contains(&file.filename.to_ascii_lowercase())
+            || !files.iter().any(|name| name == &file.filename)
+        {
+            continue;
+        }
+        check_filename(&file.filename)?;
+        let downloads::Hash::Sha512(expected) = &file.hash else { continue };
+        let folder = directory.clone();
+        let name = file.filename.clone();
+        let expected = expected.clone();
+        let matched = tokio::task::spawn_blocking(move || {
+            let revision = Revision::read(&folder, &name, None)?;
+            let hash = crate::mod_artwork::file_hash(&folder.join(&name))?;
+            ensure!(hash.eq_ignore_ascii_case(&expected), "A different local mod already uses {name}.");
+            Ok::<_, anyhow::Error>(revision)
+        }).await??;
+        local_dependencies.push(matched);
+    }
+    plan.retain(|(_, file)| !local_dependencies.iter().any(|revision| revision.file == file.filename));
+    let mut revisions = plan
         .iter()
         .filter_map(|(platform, file)| {
             old.iter()
@@ -725,9 +828,12 @@ pub async fn preview_updates(
         })
         .map(|entry| Revision::read(&directory, &entry.file, Some(entry.clone())))
         .collect::<Result<Vec<_>>>()?;
+    revisions.extend(local_revision);
+    revisions.extend(local_dependencies);
     Ok(PreparedUpdate {
         instance_id: instance.id,
         old,
+        adopted,
         plan,
         files,
         revisions,
@@ -735,6 +841,25 @@ pub async fn preview_updates(
         loader: instance.options.loader,
         loader_version: instance.options.loader_version,
         channel: instance.options.update_channel,
+    })
+}
+
+pub async fn update_target(client: &Client, store: &Store, instance: &Instance, name: &str) -> Result<ManagedMod> {
+    let directory = store.game_dir(instance.id)?.join("mods");
+    check_directory(&directory)?;
+    let name = current_mod_file(&directory, name)?;
+    let path = directory.join(&name);
+    if let Some(managed) = installed(store, instance.id)?.into_iter().find(|item| item.file == name) {
+        return Ok(managed);
+    }
+    let hash = tokio::task::spawn_blocking(move || crate::mod_artwork::file_hash(&path)).await??;
+    let mut matched = providers::modrinth_artwork(client, &[&hash]).await?;
+    let artwork = matched.remove(&hash).context("Voltra couldn’t match this local JAR to a catalog version.")?;
+    Ok(ManagedMod {
+        platform: Platform::Modrinth, project: artwork.project, version: artwork.version,
+        title: artwork.title, icon_url: artwork.icon_url, display_version: artwork.display_version,
+        file: name, minecraft_version: instance.options.minecraft_version.clone(), loader: instance.options.loader,
+        export_url: None, export_sha512: Some(hash), dependencies: Vec::new(), side: ModSide::Unknown,
     })
 }
 
@@ -782,7 +907,9 @@ pub async fn apply_preview(
     prepared: PreparedUpdate,
     job: &Job,
 ) -> Result<()> {
-    let install = (prepared.old.clone(), prepared.plan.clone(), Action::Update);
+    let mut old = prepared.old.clone();
+    old.extend(prepared.adopted.iter().cloned());
+    let install = (old, prepared.plan.clone(), Action::Update);
     install_plan(client, store, instance, limit, install, Some(prepared), job).await
 }
 
@@ -845,7 +972,8 @@ async fn install_plan(
         }
         let backup = store.snapshot_content(id)?;
         ensure!(!cancel.is_cancelled(), "Cancelled.");
-        commit(&store, &instance, old, plan, action, backup, work)
+        let adopted = preview.as_ref().and_then(|preview| preview.adopted.as_ref()).map(|item| item.file.as_str());
+        commit(&store, &instance, old, plan, action, backup, work, adopted)
     })
     .await?
 }
@@ -863,6 +991,9 @@ async fn resolve(
     match operation {
         Operation::Install(platform, project) => {
             pending.push_back((platform, Some(project), None, true))
+        }
+        Operation::Version(platform, project, version) => {
+            pending.push_back((platform, Some(project), Some(version), true));
         }
         Operation::Update(project) => {
             for entry in old
@@ -984,6 +1115,7 @@ fn commit(
     action: Action,
     backup: Uuid,
     work: tempfile::TempDir,
+    adopted: Option<&str>,
 ) -> Result<()> {
     let id = instance.id;
     let directory = store.game_dir(id)?.join("mods");
@@ -1010,7 +1142,8 @@ fn commit(
         let before = if let Some(previous) = previous {
             owned.remove(&previous.file.to_ascii_lowercase());
             let source = store.backup_mods(backup, id)?;
-            let revision = Revision::read(&source, &previous.file, Some(previous.clone()))?;
+            let managed = (adopted != Some(previous.file.as_str())).then(|| previous.clone());
+            let revision = Revision::read(&source, &previous.file, managed)?;
             revision.check(&directory)?;
             writes.push((
                 directory.join(previous.file),
@@ -1230,7 +1363,41 @@ mod tests {
         }
         let old = installed(store, instance.id).unwrap();
         let backup = store.snapshot(instance.id).unwrap();
-        commit(store, instance, old, plan, Action::Update, backup, work).unwrap();
+        commit(store, instance, old, plan, Action::Update, backup, work, None).unwrap();
+    }
+
+    #[test]
+    fn toggle_reuses_current_mod_filename_when_content_list_is_stale() -> Result<()> {
+        let (_root, store, instance) = fixture();
+        apply_fixture(
+            &store,
+            &instance,
+            vec![file("sound-features", "1", vec![]), file("other", "1", vec![])],
+        );
+        let id = instance.id;
+        let dir = store.game_dir(id)?.join("mods");
+        let enabled = "sound-features-1.jar";
+        let disabled = "sound-features-1.jar.disabled";
+
+        let changed = toggle(&store, id, enabled, false)?;
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].requested, enabled);
+        assert_eq!(changed[0].file, disabled);
+        assert!(!changed[0].enabled);
+        assert!(!dir.join(enabled).exists());
+        assert_eq!(current_mod_file(&dir, enabled)?, disabled);
+        toggle_many(&store, id, &[disabled.into(), enabled.into(), "other-1.jar".into()], true)?;
+        assert!(!dir.join(disabled).exists());
+        assert_eq!(current_mod_file(&dir, disabled)?, enabled);
+        assert!(list(&store, id)?.iter().all(|item| item.enabled && item.managed.is_some()));
+
+        toggle(&store, id, disabled, false)?;
+        toggle(&store, id, enabled, false)?;
+        assert_eq!(fs::read(dir.join(disabled))?, enabled.as_bytes());
+        assert!(remove(&store, id, enabled).is_err());
+        assert!(dir.join(disabled).is_file());
+        assert!(toggle(&store, id, "gone.jar.disabled", true).unwrap_err().to_string().contains("Refresh Content"));
+        Ok(())
     }
 
     #[test]
@@ -1336,6 +1503,7 @@ mod tests {
         let directory = store.game_dir(instance.id).unwrap().join("mods");
         let prepared = PreparedUpdate {
             instance_id: instance.id,
+            adopted: None,
             revisions: vec![
                 Revision::read(&directory, &old[0].file, Some(old[0].clone())).unwrap(),
             ],

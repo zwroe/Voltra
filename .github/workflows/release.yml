@@ -1,0 +1,114 @@
+name: Launcher release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            artifact: windows-x64
+            bundles: nsis
+            assets: src-tauri/target/release/bundle/nsis/*-setup.exe
+          - runner: macos-15
+            artifact: macos-arm64
+            bundles: dmg
+            assets: src-tauri/target/release/bundle/dmg/*.dmg
+          - runner: macos-15-intel
+            artifact: macos-x64
+            bundles: dmg
+            assets: src-tauri/target/release/bundle/dmg/*.dmg
+          - runner: ubuntu-22.04
+            artifact: linux-x64
+            bundles: deb,appimage
+            assets: |
+              src-tauri/target/release/bundle/deb/*.deb
+              src-tauri/target/release/bundle/appimage/*.AppImage
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Check the release tag
+        if: github.ref_type == 'tag'
+        run: node --input-type=module -e "import fs from 'node:fs'; const version = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json')).version; if (process.env.GITHUB_REF_NAME !== 'v' + version) throw Error('Tag must match the Tauri version v' + version);"
+      - run: npm ci
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Build installer
+        shell: bash
+        env:
+          VOLTRA_MICROSOFT_CLIENT_ID: ${{ secrets.VOLTRA_MICROSOFT_CLIENT_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" && -z "$VOLTRA_MICROSOFT_CLIENT_ID" ]]; then
+            echo "::error::Set the VOLTRA_MICROSOFT_CLIENT_ID repository Actions secret before releasing."
+            exit 1
+          fi
+          npm run tauri -- build --bundles "${{ matrix.bundles }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voltra-${{ matrix.artifact }}
+          path: ${{ matrix.assets }}
+          if-no-files-found: error
+
+  draft:
+    name: Draft GitHub release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: voltra-*
+          merge-multiple: false
+          path: installers
+      - name: Attach installers and SHA-256 checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir assets
+          cp "$(find installers/voltra-windows-x64 -name '*-setup.exe')" "assets/Voltra-${GITHUB_REF_NAME}-windows-x64-setup.exe"
+          cp "$(find installers/voltra-macos-arm64 -name '*.dmg')" "assets/Voltra-${GITHUB_REF_NAME}-macos-arm64.dmg"
+          cp "$(find installers/voltra-macos-x64 -name '*.dmg')" "assets/Voltra-${GITHUB_REF_NAME}-macos-x64.dmg"
+          cp "$(find installers/voltra-linux-x64 -name '*.deb')" "assets/Voltra-${GITHUB_REF_NAME}-linux-x64.deb"
+          cp "$(find installers/voltra-linux-x64 -name '*.AppImage')" "assets/Voltra-${GITHUB_REF_NAME}-linux-x64.AppImage"
+          (cd assets && sha256sum * > SHA256SUMS.txt)
+          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' > release-state; then
+            if [[ "$(cat release-state)" != true ]]; then
+              echo "::error::This version is already published. Tag a new version to replace its installers."
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" assets/* --verify-tag --draft --title "Voltra $GITHUB_REF_NAME" --generate-notes
+          fi

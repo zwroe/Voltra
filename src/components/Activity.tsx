@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useEffect, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { Activity, Check, ChevronDown, CircleAlert, Download, FileText, Link2, LoaderCircle, RefreshCw, Wrench, X } from "lucide-react";
@@ -128,9 +129,9 @@ export function Diagnostics({ instanceId }: { instanceId?: string } = {}) {
       <div className="section-toolbar">
         {!instanceId && <label className="target-select">
           <span className="sr-only">Instance to inspect</span>
-          <select value={id} onChange={(event) => pick(event.target.value)}>
+          <Select value={id} onValueChange={(value) => pick(value)}>
             {instances.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
-          </select>
+          </Select>
         </label>}
         <div className="actions-wrap">{game && <span className="status-tag green"><span className="status-dot" /> Running · PID {game.pid}</span>}
           <Button onClick={() => setRefresh((value) => value + 1)}><RefreshCw /> Refresh log</Button>

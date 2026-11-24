@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useCallback, useState } from "react";
 import { createPortal } from "react-dom";
 import { Archive, ChevronRight, Folder, FolderOpen, FolderPlus, GripVertical, Layers3, Pencil, Play, Plus, Search, Trash2 } from "lucide-react";
@@ -178,7 +179,7 @@ export function LibraryGrid({ instances, onCreate, onPlay }: {
         : edit.kind === "move" ? `Choose a folder for ${name ?? "this instance"}.` : "Folders organize instances in your Library."}
       onOpenChange={(open) => { if (!open && !archiving) setEdit(null); }}>
       <form className="form-stack" onSubmit={(event) => { event.preventDefault(); void apply(); }}>
-        {edit.kind === "move" ? <label>Folder<select value={value} onChange={(event) => setValue(event.target.value)}><option value="">Library</option>{folders.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        {edit.kind === "move" ? <label>Folder<Select value={value} onValueChange={(value) => setValue(value)}><option value="">Library</option>{folders.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</Select></label>
           : edit.kind !== "remove" && edit.kind !== "archive" && <label>Folder name<input autoFocus required value={value} maxLength={60} onChange={(event) => setValue(event.target.value)} /></label>}
         {edit.kind === "archive" && archiveError && <p className="inline-error" role="alert">{archiveError}</p>}
         <div className="dialog-actions"><Button variant="ghost" disabled={archiving} onClick={() => setEdit(null)}>Cancel</Button>

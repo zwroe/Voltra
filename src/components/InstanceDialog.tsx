@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Archive, ArrowDownToLine, Box, Coffee, Copy, ImagePlus, Monitor, RotateCcw, Search, Terminal, Wrench } from "lucide-react";
 import { call, errorText, loaderNames, type Catalog, type Instance, type JavaVersion, type Loader, type SyncItem, type UpdateChannel } from "../api";
@@ -7,7 +8,7 @@ import { Dialog } from "./ui/dialog";
 import { InstanceArtwork } from "./InstanceArtwork";
 import { argumentsFrom, environmentFrom, environmentText, HookFields, ResetField, WindowFields } from "./LaunchSettingsFields";
 import { MemorySlider } from "./MemorySlider";
-import { MinecraftVersionBrowser } from "./MinecraftVersionBrowser";
+import { MinecraftVersionBrowser, SearchableSelect } from "./MinecraftVersionBrowser";
 
 const pages = [
   { id: "general", label: "General", Icon: ImagePlus },
@@ -33,8 +34,22 @@ export function InstanceDialog({ instance, onClose, onDefaults, onCreated }: {
   const [version, setVersion] = useState(instance?.minecraftVersion ?? "");
   const [loader, setLoader] = useState<Loader>(instance?.loader ?? "vanilla");
   const [loaderVersion, setLoaderVersion] = useState(instance?.loaderVersion ?? "");
-  const [loaderOptions, setLoaderOptions] = useState<string[] | null>(null);
-  const [loaderError, setLoaderError] = useState(false);
+  const [loaderResult, setLoaderResult] = useState<{ key: string; options: string[] | null }>();
+  const [loaderRetry, setLoaderRetry] = useState(0);
+  const gameVersion = version.trim();
+  const loaderKey = JSON.stringify([loader, gameVersion, loaderRetry]);
+  const currentResult = loaderResult?.key === loaderKey ? loaderResult : undefined;
+  const loaderOptions = currentResult?.options;
+  const loaderError = currentResult?.options === null;
+  const changedInstallation = !instance || gameVersion !== instance.minecraftVersion || loader !== instance.loader ||
+    loaderVersion.trim() !== (instance.loaderVersion ?? "");
+  const loaderProblem = loader !== "vanilla" && changedInstallation && gameVersion
+    ? loaderError ? "Couldn't check loader compatibility. Try again."
+      : !loaderOptions ? "Checking loader compatibility…"
+      : !loaderOptions.length ? `${loaderNames[loader]} has no published builds for Minecraft ${gameVersion}.`
+      : loaderVersion.trim() && !loaderOptions.includes(loaderVersion.trim()) ? "Choose a compatible loader version."
+      : ""
+    : "";
   const [launch, setLaunch] = useState(instance?.launch ?? { inheritMemory: !instance });
   const [ram, setRam] = useState(instance?.ramMib ?? defaults.ramMib);
   const [jvm, setJvm] = useState(instance?.jvmArgs.join("\n") ?? "");
@@ -45,6 +60,10 @@ export function InstanceDialog({ instance, onClose, onDefaults, onCreated }: {
   const [catalogError, setCatalogError] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const versionButton = useRef<HTMLButtonElement>(null);
+  const [loaderPickerOpen, setLoaderPickerOpen] = useState(false);
+  const loaderButton = useRef<HTMLButtonElement>(null);
+  const [loaderTypeOpen, setLoaderTypeOpen] = useState(false);
+  const loaderTypeButton = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirm, setConfirm] = useState<"archive" | null>(null);
@@ -65,18 +84,16 @@ export function InstanceDialog({ instance, onClose, onDefaults, onCreated }: {
   }, []);
 
   useEffect(() => {
-    if (instance && panel !== "installation") return;
+    if ((instance && panel !== "installation" && !changedInstallation) || currentResult) return;
     let live = true;
-    setLoaderOptions(null);
-    setLoaderError(false);
-    if (loader === "vanilla" || !version.trim()) return;
+    if (loader === "vanilla" || !gameVersion) return;
     const timer = setTimeout(() => {
-      call<string[]>("loader_versions", { loader, game: version.trim() }).then((options) => {
-        if (live) setLoaderOptions([...new Set(options)]);
-      }).catch(() => { if (live) setLoaderError(true); });
+      call<string[]>("loader_versions", { loader, game: gameVersion }).then((options) => {
+        if (live) setLoaderResult({ key: loaderKey, options: [...new Set(options)] });
+      }).catch(() => { if (live) setLoaderResult({ key: loaderKey, options: null }); });
     }, 180);
     return () => { live = false; clearTimeout(timer); };
-  }, [instance, panel, loader, version]);
+  }, [instance, panel, loader, gameVersion, loaderKey, changedInstallation, currentResult]);
 
   async function perform(work: () => Promise<void>) {
     setBusy(true);
@@ -92,9 +109,10 @@ export function InstanceDialog({ instance, onClose, onDefaults, onCreated }: {
 
   function save(event: FormEvent) {
     event.preventDefault();
+    if (busy || loaderProblem || !gameVersion || !name.trim()) return;
     void perform(async () => {
       const options = {
-        name, icon, updateChannel: channel, minecraftVersion: version.trim(), loader, loaderVersion: loaderVersion.trim() || null, ramMib: ram,
+        name, icon, updateChannel: channel, minecraftVersion: gameVersion, loader, loaderVersion: loaderVersion.trim() || null, ramMib: ram,
         jvmArgs: argumentsFrom(jvm), launch: { ...launch, environment: environment === null ? null : environmentFrom(environment) },
       };
       const saved = await call<Instance>(instance ? "update_instance" : "create_instance", { id: instance?.id, options });
@@ -118,28 +136,30 @@ export function InstanceDialog({ instance, onClose, onDefaults, onCreated }: {
         open={pickerOpen} setOpen={setPickerOpen} button={versionButton} />
         : <label>Minecraft version<input value={version} onChange={(event) => changeVersion(event.target.value)}
           maxLength={96} placeholder={fetching ? "Loading versions." : "e.g. 1.21.1"} required disabled={fetching} /></label>}
-      <label>Mod loader<select value={loader} onChange={(event) => {
-        setLoader(event.target.value as Loader);
-        setLoaderVersion("");
-      }}>{Object.entries(loaderNames).map(([id, title]) => <option key={id} value={id}>{title}</option>)}</select></label>
+      <SearchableSelect label="Mod loader" value={loader} open={loaderTypeOpen} setOpen={setLoaderTypeOpen}
+        button={loaderTypeButton} placeholder="" searchable={false}
+        options={Object.entries(loaderNames).map(([id, label]) => ({ id, label }))} onSelect={(value) => {
+          if (value !== loader) {
+            setLoader(value as Loader);
+            setLoaderVersion("");
+          }
+        }} />
     </div>
     {catalogError && <p className="field-hint">{catalogError}</p>}
-    {loader !== "vanilla" && (loaderError ? <label>Loader version
-      <input value={loaderVersion} onChange={(event) => setLoaderVersion(event.target.value)} placeholder="Automatic, or enter an exact version" maxLength={96} />
-      <span className="field-hint">The provider’s version list couldn’t be loaded.</span>
-    </label> : <label>Loader version
-      <select value={loaderVersion} onChange={(event) => setLoaderVersion(event.target.value)} disabled={!version || !loaderOptions}>
-        <option value="">{!version ? "Choose a Minecraft version" : loaderOptions === null ? "Loading releases." : "Automatic (recommended)"}</option>
-        {loaderVersion && !loaderOptions?.includes(loaderVersion) && <option value={loaderVersion}>{loaderVersion}</option>}
-        {loaderOptions?.map((item) => <option value={item} key={item}>{item}</option>)}
-      </select>
-      {loaderOptions?.length === 0 && <span className="field-hint">No compatible installer was returned for this Minecraft version.</span>}
-    </label>)}
+    {loader !== "vanilla" && <>
+      <SearchableSelect label="Loader version" value={loaderVersion} onSelect={setLoaderVersion}
+        open={loaderPickerOpen} setOpen={setLoaderPickerOpen} button={loaderButton} placeholder="Find a loader version"
+        disabled={!gameVersion || !loaderOptions?.length} options={[
+          { id: "", label: !gameVersion ? "Choose a Minecraft version" : "Automatic (recommended)" },
+          ...(loaderOptions ?? []).map((id) => ({ id })),
+        ]} />
+      {loaderProblem && <p className="field-hint" role="status">{loaderProblem}</p>}
+      {loaderError && <Button size="small" onClick={() => setLoaderRetry((value) => value + 1)}>Retry loader check</Button>}
+    </>}
   </div>;
 
   const artwork = <InstanceArtwork loader={loader} icon={icon} change={setIcon} busy={busy} setBusy={setBusy} onError={setError} />;
   const nameField = <label>Instance name<input value={name} onChange={(event) => setName(event.target.value)} required maxLength={64} placeholder="Survival" /></label>;
-  const changedInstallation = instance && (version !== instance.minecraftVersion || loader !== instance.loader || loaderVersion !== (instance.loaderVersion ?? ""));
 
   function openDefaults(target: DefaultsPanel) {
     onClose();
@@ -151,17 +171,19 @@ export function InstanceDialog({ instance, onClose, onDefaults, onCreated }: {
     description={instance ? "Configure this Minecraft instance." : "Choose a Minecraft release, a loader, and an icon."}
     onOpenChange={(open) => { if (!open && !busy) onClose(); }}
     onEscapeKeyDown={(event) => {
-      if (pickerOpen) {
+      if (pickerOpen || loaderPickerOpen || loaderTypeOpen) {
         event.preventDefault();
         setPickerOpen(false);
-        versionButton.current?.focus();
+        setLoaderPickerOpen(false);
+        setLoaderTypeOpen(false);
+        (loaderPickerOpen ? loaderButton : loaderTypeOpen ? loaderTypeButton : versionButton).current?.focus();
       }
     }}>
     <form className={instance ? "instance-settings-form" : "form-stack"} onSubmit={save}>
       {instance ? <div className="instance-settings-layout">
         <nav className="instance-settings-nav" aria-label="Instance settings sections">
           {pages.map(({ id, label, Icon }) => <button type="button" key={id} aria-pressed={panel === id}
-            onClick={() => { setPanel(id); setPickerOpen(false); }}><Icon size={17} /> {label}</button>)}
+            onClick={() => { setPanel(id); setPickerOpen(false); setLoaderPickerOpen(false); setLoaderTypeOpen(false); }}><Icon size={17} /> {label}</button>)}
         </nav>
         <div className="instance-settings-scroll">
           <section className="tab-content instance-settings-section" key={panel}>
@@ -169,9 +191,9 @@ export function InstanceDialog({ instance, onClose, onDefaults, onCreated }: {
             {panel === "general" && <>
               <div className="instance-identity">{artwork}{nameField}</div>
               <div className="instance-setting-card">
-                <label>Mod update channel<select value={channel} onChange={(event) => setChannel(event.target.value as UpdateChannel)}>
+                <label>Mod update channel<Select value={channel} onValueChange={(value) => setChannel(value as UpdateChannel)}>
                   <option value="release">Release</option><option value="beta">Beta and release</option><option value="alpha">Alpha, beta, and release</option>
-                </select></label>
+                </Select></label>
                 <p className="field-hint">Applies when checking your installed mods for updates.</p>
               </div>
               <div className="instance-setting-card">
@@ -265,7 +287,7 @@ export function InstanceDialog({ instance, onClose, onDefaults, onCreated }: {
         {error && <p className="inline-error" role="alert">{error}</p>}
         <div className="dialog-actions">
           <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
-          <Button variant="primary" type="submit" disabled={busy || (!instance && fetching) || !version.trim() || !name.trim()}>{busy ? "Working." : instance ? "Save changes" : <><Box /> Create instance</>}</Button>
+          <Button variant="primary" type="submit" disabled={busy || (!instance && fetching) || !gameVersion || !name.trim() || Boolean(loaderProblem)}>{busy ? "Working." : instance ? "Save changes" : <><Box /> Create instance</>}</Button>
         </div>
       </div>
     </form>
@@ -361,10 +383,10 @@ function InstanceSync({ instance, busy, save }: { instance: Instance; busy: bool
   const [confirm, setConfirm] = useState(false);
   return <>
     <p className="muted">Copy selected Minecraft data from another local instance. Voltra backs up this instance first.</p>
-    <label>Source instance<select value={source} onChange={(event) => setSource(event.target.value)}>
+    <label>Source instance<Select value={source} onValueChange={(value) => setSource(value)}>
       <option value="">{others.length ? "Choose an instance" : "No other instances"}</option>
       {others.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.minecraftVersion})</option>)}
-    </select></label>
+    </Select></label>
     <div className="instance-setting-card">
       {syncItems.map(({ id, label }) => <label className="inline-checkbox" key={id}>
         <input type="checkbox" checked={items.includes(id)}

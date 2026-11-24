@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useMemo, useState } from "react";
 import { Activity, BarChart3, Clock3, RotateCcw } from "lucide-react";
 import { displayDate, type Instance } from "../api";
@@ -76,10 +77,10 @@ export function PackPerformance({ instance, onDiagnostics }: { instance: Instanc
         {Object.keys(last.worldSeconds).length > 0 && <details><summary>World time reported by the companion mod</summary>
           <ul>{Object.entries(last.worldSeconds).map(([name, seconds]) => <li key={name}>{name} · {duration(seconds)}</li>)}</ul>
         </details>}
-        <label>Compare with<select value={previous?.id ?? ""} onChange={(event) => setCompare(event.target.value || null)}>
+        <label>Compare with<Select value={previous?.id ?? ""} onValueChange={(value) => setCompare(value || null)}>
           <option value="">Select a recorded session</option>
           {rows.filter((row) => row.id !== last.id).map((row) => <option value={row.id} key={row.id}>{displayDate(row.startedAt)}</option>)}
-        </select></label>
+        </Select></label>
         {previous && <div className="table-scroll"><table className="pack-table"><thead><tr><th>Measurement</th><th>Selected</th><th>Comparison</th></tr></thead><tbody>
           <tr><th>Preparing</th><td>{duration(last.preparationSeconds)}</td><td>{duration(previous.preparationSeconds)}</td></tr>
           <tr><th>Average CPU</th><td>{last.sampleCount ? last.meanCpuPercent.toFixed(1) + "%" : "—"}</td><td>{previous.sampleCount ? previous.meanCpuPercent.toFixed(1) + "%" : "—"}</td></tr>

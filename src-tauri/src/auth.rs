@@ -1,5 +1,5 @@
 use anyhow::{bail, ensure, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -40,9 +40,19 @@ pub struct Account {
     #[serde(default)]
     pub skin_url: Option<String>,
     #[serde(default)]
+    pub skin_variant: Option<crate::media::Variant>,
+    #[serde(default)]
     pub skin_choice: Option<String>,
     #[serde(default)]
     client_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSkin {
+    png: String,
+    variant: crate::media::Variant,
+    height: u32,
 }
 
 impl Account {
@@ -419,6 +429,7 @@ impl Auth {
             .find(|account| account.id == session.account.id)
             .context("Account not found.")?;
         account.skin_url = profile_skin(&profile);
+        account.skin_variant = Some(skin.variant);
         account.skin_choice = Some(skin.id);
         self.save(accounts.clone()).await?;
         Ok(accounts)
@@ -431,6 +442,25 @@ impl Auth {
             "The active account changed. Try again."
         );
         self.account_capes(&session).await
+    }
+
+    pub async fn current_skin(&self, account_id: Uuid) -> Result<Option<AccountSkin>> {
+        let session = self.session().await?;
+        ensure!(session.account.id == account_id, "The active account changed. Try again.");
+        let profile = self.client.get(format!("{MC}/minecraft/profile"))
+            .bearer_auth(&session.token).send().await?.error_for_status()?.json::<Value>().await?;
+        let Some(url) = profile_skin(&profile) else { return Ok(None) };
+        let mut response = self.client.get(url).send().await?.error_for_status()?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(bytes.len() + chunk.len() <= 1024 * 1024, "Minecraft returned an oversized skin.");
+            bytes.extend(chunk);
+        }
+        Ok(Some(AccountSkin {
+            height: crate::media::skin_height(&bytes)?,
+            variant: profile_skin_variant(&profile).unwrap_or(crate::media::Variant::Classic),
+            png: STANDARD.encode(bytes),
+        }))
     }
 
     pub async fn set_cape(&self, account_id: Uuid, cape_id: Option<Uuid>) -> Result<Vec<Cape>> {
@@ -511,7 +541,7 @@ impl Auth {
             .send()
             .await?;
         if response.status() == reqwest::StatusCode::FORBIDDEN {
-            bail!("Minecraft Services rejected this launcher client ID. Use an application approved for Minecraft in Settings.");
+            bail!("Minecraft Services rejected this build’s client ID. Install a Voltra build configured for Minecraft sign-in.");
         }
         let result: Value = response
             .error_for_status()
@@ -553,6 +583,7 @@ impl Auth {
                 id,
                 name,
                 skin_url: profile_skin(&profile),
+                skin_variant: profile_skin_variant(&profile),
                 skin_choice: None,
                 client_id,
             },
@@ -570,6 +601,15 @@ fn profile_skin(profile: &Value) -> Option<String> {
         .find(|skin| skin["state"] == "ACTIVE")?["url"]
         .as_str()?;
     texture_url(value)
+}
+
+fn profile_skin_variant(profile: &Value) -> Option<crate::media::Variant> {
+    let skin = profile["skins"].as_array()?.iter().find(|skin| skin["state"] == "ACTIVE")?;
+    match skin["variant"].as_str()?.to_ascii_lowercase().as_str() {
+        "classic" => Some(crate::media::Variant::Classic),
+        "slim" => Some(crate::media::Variant::Slim),
+        _ => None,
+    }
 }
 
 fn profile_capes(profile: &Value) -> Vec<Cape> {

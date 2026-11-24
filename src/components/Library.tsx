@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { Select } from "./ui/select";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { Activity, Archive, ArrowDownToLine, ArrowLeft, Check, ChevronDown, Clock3, FlaskConical, FolderOpen, Globe, HeartPulse, History, Images, Layers3, Play, Plus, RotateCcw, Search, Server, Settings2, Share2, Terminal, Timer, Trash2, Upload, Wrench } from "lucide-react";
 import { call, displayDate, errorText, isActiveJob, loaderNames, modSides, platformNames, type Backup, type InstalledMod, type Instance, type ModrinthArtwork, type ModSide, type Running } from "../api";
@@ -176,13 +177,17 @@ function InstanceDetail({ instance, onEdit, onPlay, onBack }: {
 }
 
 type PackKind = "resourcePacks" | "shaders";
-type Pack = { name: string; directory: boolean; addedAt: number | null };
+type Pack = { name: string; directory: boolean; addedAt: number | null; iconUrl?: string };
 type ContentRow =
   | { kind: "mods"; name: string; mod: InstalledMod; artwork?: ModrinthArtwork }
-  | { kind: PackKind; name: string; pack: Pack };
+  | { kind: PackKind; name: string; pack: Pack; artwork?: ModrinthArtwork };
 
 const packNames: Record<PackKind, string> = { resourcePacks: "Resource pack", shaders: "Shader" };
+const contentGroups = ["mods", "resourcePacks", "shaders"] as const;
 const compareNames = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }).compare;
+const fileName = (row: ContentRow) => row.kind === "mods" ? row.mod.file : row.pack.name;
+const rowKey = (row: ContentRow) => row.kind + ":" + fileName(row);
+const canSelect = (row: ContentRow) => row.kind === "mods" || !row.pack.directory;
 
 type FilterData = { matches: string[]; environments: Record<string, ModSide>; unchecked: number };
 type FilterCheck = { key: string; data?: FilterData; error?: string };
@@ -215,25 +220,35 @@ function InstalledContent({ instance, locked, confirm }: { instance: Instance; l
   const [kind, setKind] = useState<ContentKind>("all");
   const [filters, setFilters] = useState<InstalledFilters>(emptyFilters);
   const [items, setItems] = useState<ContentRow[] | null>(null);
+  const [artwork, setArtwork] = useState<Record<string, ModrinthArtwork>>({});
+  const [icons, setIcons] = useState<Record<string, string>>({});
+  const checked = useRef({ generation: "", keys: new Set<string>() });
+  const [selecting, setSelecting] = useState(false);
+  const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [changing, setChanging] = useState(false);
+  const mutation = useRef(false);
+  const [loadedRequest, setLoadedRequest] = useState("");
   const [exporting, setExporting] = useState(false);
   const [exportPath, setExportPath] = useState("");
   const [sort, setSort] = useState<ContentSort>("az");
   const [refresh, setRefresh] = useState(0);
+  const [modRevision, setModRevision] = useState(0);
   const [openProject, setOpenProject] = useState<OpenProjectDetails | null>(null);
   const [update, setUpdate] = useState<{ file: string | null; title?: string } | null>(null);
   const [sideDialog, setSideDialog] = useState<InstalledMod | null>(null);
   const go = useLauncher((state) => state.go);
   const lastJob = useLauncher((state) => state.jobs.find((job) => job.status === "done" && job.instanceId === instance.id)?.id);
   const id = instance.id;
+  const listRequest = JSON.stringify([id, refresh, lastJob]);
+  const busy = changing || loadedRequest !== listRequest;
   const packKind = kind === "resourcePacks" || kind === "shaders" ? kind : null;
   const hasMods = items?.some((row) => row.kind === "mods");
   const hasManaged = items?.some((row) => row.kind === "mods" && row.mod.managed);
   const filteringMods = !packKind && (filters.environments.length > 0 || filters.states.length > 0 || filters.updates || filters.openSource || filters.external);
-  const metadataKey = JSON.stringify([id, refresh, lastJob, instance.loader, instance.minecraftVersion, instance.updateChannel]);
+  const metadataKey = JSON.stringify([id, refresh, modRevision, lastJob, instance.loader, instance.minecraftVersion, instance.updateChannel]);
   const environments = useFilterData(id, metadataKey, "environment", !packKind && filters.environments.length > 0 && !!hasManaged);
   const updates = useFilterData(id, metadataKey, "updates", !packKind && filters.updates && !!hasManaged);
   const licenses = useFilterData(id, metadataKey, "openSource", !packKind && filters.openSource && !!hasMods);
@@ -248,7 +263,7 @@ function InstalledContent({ instance, locked, confirm }: { instance: Instance; l
       call<InstalledMod[]>("installed_mods", { id }),
       call<Pack[]>("list_content", { id, kind: "resourcePacks" }),
       call<Pack[]>("list_content", { id, kind: "shaders" }),
-    ]).then(async ([mods, resources, shaders]) => {
+    ]).then(([mods, resources, shaders]) => {
       if (!live) return;
       const rows: ContentRow[] = [
         ...mods.map((mod): ContentRow => ({ kind: "mods", name: mod.managed?.title ?? mod.file, mod })),
@@ -256,27 +271,20 @@ function InstalledContent({ instance, locked, confirm }: { instance: Instance; l
         ...shaders.map((pack): ContentRow => ({ kind: "shaders", name: pack.name, pack })),
       ];
       setItems(rows);
+      setLoadedRequest(listRequest);
       setError("");
-      if (mods.some((mod) => !mod.managed)) {
-        // The list remains usable when artwork is unavailable or the launcher is offline.
-        const artwork = await call<Record<string, ModrinthArtwork>>("installed_mod_artwork", { id }).catch(() => null);
-        if (live && artwork) {
-          setItems(rows.map((row) => {
-            if (row.kind !== "mods" || row.mod.managed) return row;
-            const match = artwork[row.mod.file];
-            return match ? { ...row, artwork: match, name: match.title } : row;
-          }));
-        }
-      }
     }).catch((cause) => { if (live) setError(errorText(cause)); });
     return () => { live = false; };
-  }, [id, lastJob, refresh]);
+  }, [id, listRequest]);
 
   const filtered = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
     const outOfDate = new Set(updates.data?.matches);
     const openSource = new Set(licenses.data?.matches);
-    return (items ?? []).filter((row) => {
+    return (items ?? []).map((row): ContentRow => {
+      const match = artwork[rowKey(row)];
+      return match ? { ...row, artwork: match, name: row.kind === "mods" ? row.mod.managed?.title ?? match.title : match.title } : row;
+    }).filter((row) => {
       if (kind !== "all" && row.kind !== kind) return false;
       if (row.kind === "mods") {
         const { mod } = row;
@@ -287,22 +295,136 @@ function InstalledContent({ instance, locked, confirm }: { instance: Instance; l
         if (filters.openSource && !openSource.has(mod.file)) return false;
         return (row.name + " " + row.mod.file).toLocaleLowerCase().includes(term);
       }
-      return !filteringMods && row.name.toLocaleLowerCase().includes(term);
+      return !filteringMods && (row.name + " " + row.pack.name).toLocaleLowerCase().includes(term);
     }).sort((a, b) => compareContent(a, b, sort));
-  }, [items, kind, query, filteringMods, filters, sort, versionSides, updates.data, licenses.data]);
+  }, [items, artwork, kind, query, filteringMods, filters, sort, versionSides, updates.data, licenses.data]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / 32));
   const visiblePage = Math.min(page, pageCount - 1);
+  const visible = useMemo(() => filtered.slice(visiblePage * 32, (visiblePage + 1) * 32), [filtered, visiblePage]);
+  const selected = (items ?? []).filter((row) => selection.has(rowKey(row)));
+  const selectedMods = selected.flatMap((row) => row.kind === "mods" ? [row.mod] : []);
+
+  useEffect(() => {
+    if (loadedRequest !== listRequest) return;
+    if (checked.current.generation !== listRequest) {
+      checked.current = { generation: listRequest, keys: new Set() };
+    }
+    const generation = checked.current;
+    for (const group of contentGroups) {
+      const pending = visible.filter((row) => row.kind === group && !generation.keys.has(rowKey(row)));
+      if (!pending.length) continue;
+      pending.forEach((row) => generation.keys.add(rowKey(row)));
+      const prefix = (file: string) => group + ":" + file;
+      function merge<T>(results: Record<string, T>, set: React.Dispatch<React.SetStateAction<Record<string, T>>>, files: string[]) {
+        if (checked.current !== generation) return;
+        set((previous) => {
+          const next = { ...previous };
+          for (const file of files) {
+            if (results[file]) next[prefix(file)] = results[file];
+            else delete next[prefix(file)];
+          }
+          return next;
+        });
+      }
+      const files = pending.filter((row) => row.kind !== "mods" || !row.mod.managed?.iconUrl).map(fileName);
+      if (!files.length) continue;
+      void call<Record<string, string>>("installed_content_icons", { id, group, files })
+        .then((data) => merge(data, setIcons, files)).catch(() => {});
+      const lookup = pending.filter((row) => row.kind === "mods" ? !row.mod.managed?.iconUrl : !row.pack.directory && !row.pack.iconUrl).map(fileName);
+      if (lookup.length) {
+        void call<Record<string, ModrinthArtwork>>("installed_mod_artwork", { id, group, files: lookup })
+          .then((data) => merge(data, setArtwork, lookup)).catch(() => {});
+      }
+    }
+  }, [id, listRequest, loadedRequest, visible]);
+
+  function toggleSelection(row: ContentRow) {
+    setSelection((previous) => {
+      const next = new Set(previous);
+      const key = rowKey(row);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+  }
+
+  function selectionBox(row: ContentRow) {
+    return selecting && canSelect(row) && <input type="checkbox" className="content-select-checkbox"
+      aria-label={"Select " + row.name} checked={selection.has(rowKey(row))} onChange={() => toggleSelection(row)} />;
+  }
+
+  async function toggleMods(files: string[], enabled: boolean, bulk = false) {
+    await mutate(async () => {
+      const changes = await call<{ requested: string; file: string; enabled: boolean }[]>("toggle_selected_mods", { id, enabled, files });
+      const byFile = new Map(changes.map((change) => [change.requested, change]));
+      setItems((previous) => previous?.map((row) => {
+        if (row.kind !== "mods") return row;
+        const change = byFile.get(row.mod.file);
+        if (!change) return row;
+        const managed = row.mod.managed && { ...row.mod.managed, file: change.file };
+        return { ...row, name: managed?.title ?? change.file,
+          mod: { ...row.mod, file: change.file, enabled: change.enabled, managed } };
+      }) ?? null);
+
+      function moveArtwork<T>(previous: Record<string, T>) {
+        const next = { ...previous };
+        for (const { requested, file } of changes) {
+          const oldKey = "mods:" + requested;
+          const newKey = "mods:" + file;
+          if (previous[oldKey] && oldKey !== newKey) {
+            next[newKey] = previous[oldKey];
+            delete next[oldKey];
+          }
+        }
+        return next;
+      }
+      setIcons(moveArtwork);
+      setArtwork(moveArtwork);
+      setSelection((previous) => bulk ? new Set() : new Set([...previous].map((key) => {
+        const change = key.startsWith("mods:") && byFile.get(key.slice(5));
+        return change ? "mods:" + change.file : key;
+      })));
+      setModRevision((revision) => revision + 1);
+      setError("");
+      void useLauncher.getState().refreshInstances().catch(() => {});
+      return false;
+    });
+  }
+
+  function toggleSelectedMods(enabled: boolean) {
+    void toggleMods(selectedMods.map((mod) => mod.file), enabled, true);
+  }
+
+  function removeSelected() {
+    confirm({
+      title: "Remove selected content?",
+      detail: "Voltra will create a backup before removing " + selected.length + " selected items.",
+      label: "Remove selected",
+      action: () => mutate(async () => {
+        const args = { id, mods: [] as string[], resourcePacks: [] as string[], shaders: [] as string[] };
+        selected.forEach((row) => args[row.kind].push(fileName(row)));
+        await call("remove_selected_content", args);
+        setSelection(new Set());
+      }),
+    });
+  }
 
   async function mutate(action: () => Promise<unknown>) {
-    setBusy(true);
+    if (mutation.current || busy || locked) return;
+    mutation.current = true;
+    setChanging(true);
     try {
       await runAction(async () => {
-        if (await action() === false) return;
-        setRefresh((value) => value + 1);
-        await useLauncher.getState().refreshInstances();
+        let reload = true;
+        try {
+          reload = await action() !== false;
+          if (reload) await useLauncher.getState().refreshInstances();
+        } finally {
+          if (reload) setRefresh((value) => value + 1);
+        }
       });
     } finally {
-      setBusy(false);
+      mutation.current = false;
+      setChanging(false);
     }
   }
 
@@ -342,10 +464,21 @@ function InstalledContent({ instance, locked, confirm }: { instance: Instance; l
       <ContentSortAndTypes kind={kind} sort={sort} onKind={(value) => { setKind(value); setPage(0); }}
         onSort={(value) => { setSort(value); setPage(0); }} />
       <div className="actions-wrap">
+        <Button size="small" aria-pressed={selecting} onClick={() => { setSelecting(!selecting); setSelection(new Set()); }}><Check /> {selecting ? "Done selecting" : "Select"}</Button>
         <Button size="small" variant="ghost" onClick={() => setRefresh((value) => value + 1)}><RotateCcw /> Refresh</Button>
         {!packKind && <Button disabled={busy || locked || !hasManaged} onClick={() => setUpdate({ file: null })}><ArrowDownToLine /> Preview updates</Button>}
       </div>
     </div>
+    {selecting && <div className="section-toolbar content-selection">
+      <span role="status">{selected.length} selected</span>
+      <div className="actions-wrap">
+        <Button size="small" disabled={!visible.some(canSelect)} onClick={() => setSelection((previous) => new Set([...previous, ...visible.filter(canSelect).map(rowKey)]))}>Select shown</Button>
+        <Button size="small" disabled={!selected.length} onClick={() => setSelection(new Set())}>Clear</Button>
+        <Button size="small" disabled={busy || locked || !selectedMods.some((mod) => !mod.enabled)} onClick={() => toggleSelectedMods(true)}>Enable mods</Button>
+        <Button size="small" disabled={busy || locked || !selectedMods.some((mod) => mod.enabled)} onClick={() => toggleSelectedMods(false)}>Disable mods</Button>
+        <Button size="small" variant="danger" disabled={busy || locked || !selected.length} onClick={removeSelected}><Trash2 /> Remove selected</Button>
+      </div>
+    </div>}
     {!packKind && <ContentFilters value={filters} onChange={(value) => { setFilters(value); setPage(0); }} />}
     {checkingFilters && <p className="field-hint content-filter-status" role="status">Checking catalog metadata.</p>}
     {!packKind && !!filterErrors.length && <p className="inline-error" role="alert">{filterErrors.join(" ")}</p>}
@@ -357,18 +490,19 @@ function InstalledContent({ instance, locked, confirm }: { instance: Instance; l
     </div> : <>
       <div className="mod-table">
         <div className="mod-table-head"><span>Project</span><span>Version or file</span><span>Actions</span></div>
-        <ul className="rows">{filtered.slice(visiblePage * 32, (visiblePage + 1) * 32).map((row) => {
+        <ul className="rows">{visible.map((row) => {
           if (row.kind !== "mods") {
             const { pack } = row;
-            return <li className="data-row mod-table-row" key={row.kind + ":" + row.name}>
-              <div className="mod-project"><span className="row-icon"><Layers3 size={17} /></span><div className="row-main">
+            return <li className="data-row mod-table-row" key={rowKey(row)}>
+              <div className="content-project-cell">{selectionBox(row)}<div className="mod-project"><ProjectArt
+                url={pack.iconUrl ?? row.artwork?.iconUrl} fallbackUrl={icons[rowKey(row)]} /><div className="row-main">
                 <strong>{row.name}</strong><p className="muted">{packNames[row.kind]}</p>
-              </div></div>
+              </div></div></div>
               <div className="mod-version">{pack.directory ? "Folder" : "ZIP archive"}</div>
               <div className="mod-actions">{!pack.directory && <Button size="icon" variant="ghost" disabled={locked || busy}
                 aria-label={"Remove " + row.name} onClick={() => confirm({
                   title: "Remove this pack?", label: "Remove pack", detail: "Voltra will create a backup before removing " + row.name + ".",
-                  action: () => mutate(() => call("remove_content", { id, kind: row.kind, name: row.name })),
+                  action: () => mutate(() => call("remove_content", { id, kind: row.kind, name: pack.name })),
                 })}><Trash2 /></Button>}</div>
             </li>;
           }
@@ -378,14 +512,14 @@ function InstalledContent({ instance, locked, confirm }: { instance: Instance; l
           const project = managed?.project ?? row.artwork?.project;
           const platform = managed?.platform ?? (row.artwork ? "modrinth" : undefined);
           const side = mod.sideOverride ?? versionSides?.[mod.file] ?? mod.side ?? "unknown";
-          const projectInfo = <><ProjectArt url={managed?.iconUrl ?? row.artwork?.iconUrl} /><span className="row-main"><strong>{row.name}</strong>
+          const projectInfo = <><ProjectArt url={managed?.iconUrl || row.artwork?.iconUrl} fallbackUrl={icons[rowKey(row)]} /><span className="row-main"><strong>{row.name}</strong>
             <span className="muted mod-project-meta">{platform ? platformNames[platform] + " · " : ""}{mod.enabled ? "Enabled" : "Disabled"}
               {managed && (managed.loader !== instance.loader || managed.minecraftVersion !== instance.minecraftVersion) && " · Different game configuration"}
             </span></span></>;
-          return <li key={"mods:" + mod.file} className="data-row mod-table-row">
-            {project && platform ? <button type="button" className="mod-project mod-project-open" aria-haspopup="dialog" onClick={(event) => setOpenProject({
+          return <li key={rowKey(row)} className="data-row mod-table-row">
+            <div className="content-project-cell">{selectionBox(row)}{project && platform ? <button type="button" className="mod-project mod-project-open" aria-haspopup="dialog" onClick={(event) => setOpenProject({
               id: project, title: row.name, platform, trigger: event.currentTarget,
-            })}>{projectInfo}</button> : <div className="mod-project">{projectInfo}</div>}
+            })}>{projectInfo}</button> : <div className="mod-project">{projectInfo}</div>}</div>
             <div className="mod-version"><strong>{managed?.displayVersion ?? row.artwork?.displayVersion ?? (project ? "Catalog version" : "Local file")}</strong>
               <span title={mod.file}>{mod.file}</span>
               <button type="button" className="status-tag mod-side-button" aria-haspopup="dialog" disabled={locked || busy}
@@ -394,9 +528,9 @@ function InstalledContent({ instance, locked, confirm }: { instance: Instance; l
             </div>
             <div className="mod-actions">
               <label className="toggle-label"><input type="checkbox" className="switch" checked={mod.enabled} disabled={busy || locked} aria-label={"Enable " + row.name}
-                onChange={(event) => { const enabled = event.target.checked; void mutate(() => call("toggle_mod", { id, file: mod.file, enabled })); }} /></label>
-              {managed && <Button variant="ghost" size="icon" disabled={busy || locked} aria-label={"Preview update for " + managed.title} title="Preview update"
-                onClick={() => setUpdate({ file: mod.file, title: managed.title })}><ArrowDownToLine /></Button>}
+                onChange={(event) => void toggleMods([mod.file], event.target.checked)} /></label>
+              <Button variant="ghost" size="icon" disabled={busy || locked} aria-label={"Update " + row.name} title="Choose an update version"
+                onClick={() => setUpdate({ file: mod.file, title: row.name })}><ArrowDownToLine /></Button>
               <Button variant="ghost" size="icon" disabled={busy || locked} aria-label={"Remove " + mod.file} onClick={() => confirm({
                 title: "Remove this mod?", detail: "Voltra will create a backup before removing " + row.name + ".",
                 label: "Remove mod", action: () => mutate(() => call("remove_mod", { id, file: mod.file })),
@@ -438,10 +572,10 @@ function ModSideDialog({ id, mod, locked, onClose, onSaved }: {
   }
   return <Dialog open title={mod.managed?.title ?? mod.file} description="Choose where this mod belongs when you export server and client folders."
     onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
-    <label>Mod side<select value={side} disabled={busy} onChange={(event) => setSide(event.target.value as ModSide | "auto")}>
+    <label>Mod side<Select value={side} disabled={busy} onValueChange={(value) => setSide(value as ModSide | "auto")}>
       <option value="auto">Automatic</option>
       {Object.entries(modSides).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
-    </select></label>
+    </Select></label>
     {error && <p className="inline-error" role="alert">{error}</p>}
     <div className="dialog-actions">
       <Button variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button>

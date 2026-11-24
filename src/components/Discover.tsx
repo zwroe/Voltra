@@ -1,9 +1,11 @@
+import { Select } from "./ui/select";
 import { memo, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Box, Braces, Download, ExternalLink, Filter, Image, Layers3, LoaderCircle, Package, Puzzle, RefreshCw, Search, Sparkles, Telescope } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { call, errorText, isActiveJob, loaderNames, platformNames, type Catalog, type Instance, type Job, type Loader, type Platform, type Project, type ProjectKind, type ProjectSort } from "../api";
 import { runAction, useLauncher } from "../store";
 import { Button } from "./ui/button";
+import { SearchableSelect } from "./MinecraftVersionBrowser";
 import { ProjectDetailsDialog, type OpenProjectDetails } from "./ProjectDetailsDialog";
 
 const number = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
@@ -27,10 +29,12 @@ const projectKey = (platform: Platform, id: string) => `${platform}:${id}`;
 type ResultPage = { key: string; projects: Project[]; next: boolean; errors: string[] };
 const noResults: ResultPage = { key: "", projects: [], next: false, errors: [] };
 
-export function ProjectArt({ url }: { url?: string | null }) {
-  const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const image = url?.startsWith("https://") && url !== failedUrl;
-  return <span className="project-art">{image ? <img src={url!} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailedUrl(url!)} /> : <Package strokeWidth={1.4} />}</span>;
+export function ProjectArt({ url, fallbackUrl }: { url?: string | null; fallbackUrl?: string }) {
+  const [failed, setFailed] = useState<string[]>([]);
+  const image = [url, fallbackUrl].find((source) =>
+    source && /^(https:\/\/|data:image\/png;base64,)/.test(source) && !failed.includes(source));
+  return <span className="project-art">{image ? <img src={image} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer"
+    onError={() => setFailed((previous) => [...previous, image])} /> : <Package strokeWidth={1.4} />}</span>;
 }
 
 export function Discover({ active, onOpenIntegrations }: { active: boolean; onOpenIntegrations: () => void }) {
@@ -65,6 +69,8 @@ export function Discover({ active, onOpenIntegrations }: { active: boolean; onOp
   const [submitting, setSubmitting] = useState<Set<string>>(() => new Set());
   const [openProject, setOpenProject] = useState<OpenProjectDetails | null>(null);
   const targetMatches = compatible && kind !== "modpack" && target;
+  const [versionsOpen, setVersionsOpen] = useState(false);
+  const versionButton = useRef<HTMLButtonElement>(null);
   const game = targetMatches ? target.minecraftVersion : chosenVersion;
   const showLoaders = kind === "mod" || kind === "modpack";
   const loader = showLoaders ? targetMatches ? target.loader : chosenLoader : "";
@@ -197,12 +203,12 @@ export function Discover({ active, onOpenIntegrations }: { active: boolean; onOp
           <Button type="submit" variant="primary">Search</Button>
         </form>
         <div className="catalog-tools">
-          <label><span className="sr-only">Sort projects</span><select value={sort} onChange={(event) => { setSort(event.target.value as ProjectSort); setPage(0); }}>
+          <label><span className="sr-only">Sort projects</span><Select value={sort} onValueChange={(value) => { setSort(value as ProjectSort); setPage(0); }}>
             <option value="relevance">Relevance</option><option value="downloads">Most downloaded</option><option value="updated">Recently updated</option><option value="newest">Newest</option>
-          </select></label>
-          <label><span className="sr-only">Results per catalog</span><select value={limit} onChange={(event) => { setLimit(Number(event.target.value)); setPage(0); }}>
+          </Select></label>
+          <label><span className="sr-only">Results per catalog</span><Select value={limit} onValueChange={(value) => { setLimit(Number(value)); setPage(0); }}>
             <option value={10}>10 per catalog</option><option value={20}>20 per catalog</option><option value={40}>40 per catalog</option>
-          </select></label>
+          </Select></label>
           <div className="compact-pager">
             <Button size="icon" aria-label="Refresh results" title="Refresh results" disabled={loading} onClick={() => setRevision((value) => value + 1)}><RefreshCw /></Button>
             <Button size="small" disabled={page === 0 || loading} onClick={() => setPage(page - 1)}>Previous</Button>
@@ -232,31 +238,32 @@ export function Discover({ active, onOpenIntegrations }: { active: boolean; onOp
         <header><h2><Filter size={17} /> Filters</h2><button type="button" onClick={resetFilters}>Clear</button></header>
         {kind !== "modpack" && <fieldset className="catalog-filter-group">
           <legend>Install target</legend>
-          <label>Install to<select value={target?.id ?? ""} onChange={(event) => {
-            pick(event.target.value || null); setCompatible(Boolean(event.target.value)); setPage(0);
+          <label>Install to<Select value={target?.id ?? ""} onValueChange={(value) => {
+            pick(value || null); setCompatible(Boolean(value)); setPage(0);
           }}><option value="">Select an instance</option>
             {instances.map((instance) => <option value={instance.id} key={instance.id}>{instance.name}</option>)}
-          </select></label>
+          </Select></label>
           {target && <label className="inline-checkbox"><input type="checkbox" checked={compatible} onChange={(event) => { setCompatible(event.target.checked); setPage(0); }} /> Match this instance</label>}
-          {kind === "datapack" && target && <label>World<select value={world} onChange={(event) => setWorld(event.target.value)}>
+          {kind === "datapack" && target && <label>World<Select value={world} onValueChange={(value) => setWorld(value)}>
             {!worlds.length && <option value="">No local worlds</option>}{worlds.map((name) => <option key={name} value={name}>{name}</option>)}
-          </select></label>}
+          </Select></label>}
           {kind === "mod" && target?.loader === "vanilla" && <p className="field-hint"><Box size={15} /> Choose a modded instance to install mods.</p>}
         </fieldset>}
         <fieldset className="catalog-filter-group">
           <legend>Catalog</legend>
-          <label>Provider<select value={source} onChange={(event) => { setSource(event.target.value as Source); setPage(0); }}>
+          <label>Provider<Select value={source} onValueChange={(value) => { setSource(value as Source); setPage(0); }}>
             <option value="all">All catalogs</option>{sources.map((item) => <option value={item} key={item}>{platformNames[item]}</option>)}
-          </select></label>
-          <label>Game version<input list="discover-game-versions" maxLength={40} value={game} disabled={Boolean(targetMatches)} placeholder="Any version"
-            onFocus={loadVersions} onChange={(event) => { setGame(event.target.value); setPage(0); }} /></label>
-          <datalist id="discover-game-versions">{versions?.map((item) => <option key={item} value={item} />)}</datalist>
-          {showLoaders && <label>Loader<select value={loader} disabled={Boolean(targetMatches)} onChange={(event) => { setLoader(event.target.value as Loader | ""); setPage(0); }}>
+          </Select></label>
+          <SearchableSelect label="Game version" options={[{ id: "", label: "Any version" }, ...(versions ?? []).map((id) => ({ id }))]}
+            value={game} open={versionsOpen && !targetMatches} button={versionButton} disabled={Boolean(targetMatches)}
+            setOpen={(open) => { setVersionsOpen(open); if (open) loadVersions(); }} placeholder="Find a release" allowCustom
+            onSelect={(value) => { setGame(value); setPage(0); }} />
+          {showLoaders && <label>Loader<Select value={loader} disabled={Boolean(targetMatches)} onValueChange={(value) => { setLoader(value as Loader | ""); setPage(0); }}>
             <option value="">Any loader</option>{Object.entries(loaderNames).map(([id, title]) => <option key={id} value={id}>{title}</option>)}
-          </select></label>}
-          <label>Category<select value={category} onChange={(event) => { setCategory(event.target.value); setPage(0); }}>
+          </Select></label>}
+          <label>Category<Select value={category} onValueChange={(value) => { setCategory(value); setPage(0); }}>
             <option value="">All categories</option>{categories[kind].map((id) => <option key={id} value={id}>{label(id)}</option>)}
-          </select></label>
+          </Select></label>
           {kind === "mod" && target && <label className="inline-checkbox"><input type="checkbox" checked={hide} onChange={(event) => setHide(event.target.checked)} /> Hide installed mods</label>}
         </fieldset>
       </aside>

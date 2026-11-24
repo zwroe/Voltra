@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, FolderOpen, Image, Search } from "lucide-react";
 import { call, displayDate, errorText, type Screenshot } from "../api";
@@ -76,11 +77,11 @@ export function Screenshots({ instanceId }: { instanceId?: string }) {
     <div className="gallery-toolbar">
       <label className="search-field"><Search size={17} /><input aria-label="Search screenshots" value={search}
         onChange={(event) => { setSearch(event.target.value); setLimit(36); }} placeholder="Search screenshots" /></label>
-      {!instanceId && <select aria-label="Screenshot instance" value={instance} onChange={(event) => { setInstance(event.target.value); setLimit(36); }}>
+      {!instanceId && <Select aria-label="Screenshot instance" value={instance} onValueChange={(value) => { setInstance(value); setLimit(36); }}>
         <option value="">All instances</option>{instances.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
-      </select>}
-      <select aria-label="Screenshot sorting" value={newest ? "new" : "old"} onChange={(event) => setNewest(event.target.value === "new")}><option value="new">Newest</option><option value="old">Oldest</option></select>
-      <select aria-label="Group screenshots by" value={groupBy} onChange={(event) => setGroupBy(event.target.value as "date" | "instance")}><option value="date">Group by date</option><option value="instance">Group by instance</option></select>
+      </Select>}
+      <Select aria-label="Screenshot sorting" value={newest ? "new" : "old"} onValueChange={(value) => setNewest(value === "new")}><option value="new">Newest</option><option value="old">Oldest</option></Select>
+      <Select aria-label="Group screenshots by" value={groupBy} onValueChange={(value) => setGroupBy(value as "date" | "instance")}><option value="date">Group by date</option><option value="instance">Group by instance</option></Select>
       <Button size="small" onClick={() => setRefresh((value) => value + 1)}>Refresh</Button>
       {instance && <Button size="small" onClick={() => void runAction(() => call("open_folder", { id: instance, folder: "screenshots" }))}><FolderOpen /> Folder</Button>}
     </div>

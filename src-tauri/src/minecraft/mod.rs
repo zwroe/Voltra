@@ -344,6 +344,21 @@ pub async fn loader_versions(client: &Client, loader: Loader, game: &str) -> Res
     }
 }
 
+pub async fn validate_loader(client: &Client, loader: Loader, game: &str, version: Option<&str>) -> Result<()> {
+    if loader == Loader::Vanilla {
+        return Ok(());
+    }
+    let builds = loader_versions(client, loader, game).await
+        .context("Couldn't verify loader compatibility. Try again.")?;
+    ensure!(!builds.is_empty(), "{} has no published builds for Minecraft {game}.", loader.as_str());
+    if let Some(version) = version {
+        ensure!(builds.iter().any(|build| build == version
+            || (matches!(loader, Loader::Forge | Loader::Neoforge) && forge::is_build(loader, game, version, build))),
+            "{} {version} is unavailable for Minecraft {game}.", loader.as_str());
+    }
+    Ok(())
+}
+
 fn loader_api(loader: Loader) -> Option<&'static str> {
     match loader {
         Loader::Fabric => Some("https://meta.fabricmc.net/v2"),
@@ -701,6 +716,7 @@ pub async fn prepare(
         .unwrap_or(&settings.java_path);
     let installer = matches!(instance.options.loader, Loader::Forge | Loader::Neoforge);
     let mut java = None;
+    let mut launch_client = client_path.clone();
     let shared_libraries = cache.join("libraries");
     let (profile, loader_version, library_dir) = if installer {
         downloads::batch(
@@ -711,25 +727,32 @@ pub async fn prepare(
             "Checking Minecraft client",
         )
         .await?;
-        let java_path = resolve_java(client, store, java_path, required, java_gate, job).await?;
         let _loader_guard = tokio::select! {
             _ = job.cancel.cancelled() => bail!("Cancelled."),
             lock = loader_gate.lock() => lock,
         };
-        let (profile, version, libraries) = forge::prepare(
-            client,
-            &cache,
-            instance.options.loader,
-            id,
-            instance.options.loader_version.as_deref(),
-            &descriptor,
-            &client_path,
-            &java_path,
-            job,
-        )
-        .await?;
-        java = Some(java_path);
-        (Some(profile), Some(version), libraries)
+        if instance.options.loader == Loader::Forge && forge::uses_client_patch(id) {
+            let (version, patched) = forge::prepare_patched_client(client, &cache, id,
+                instance.options.loader_version.as_deref(), &client_path, &game, job).await?;
+            launch_client = patched;
+            (None, Some(version), shared_libraries.clone())
+        } else {
+            let java_path = resolve_java(client, store, java_path, required, java_gate, job).await?;
+            let (profile, version, libraries) = forge::prepare(
+                client,
+                &cache,
+                instance.options.loader,
+                id,
+                instance.options.loader_version.as_deref(),
+                &descriptor,
+                &client_path,
+                &java_path,
+                job,
+            )
+            .await?;
+            java = Some(java_path);
+            (Some(profile), Some(version), libraries)
+        }
     } else {
         let (profile, version) = loader_profile(client, store, instance, job).await?;
         (profile, version, shared_libraries.clone())
@@ -774,7 +797,7 @@ pub async fn prepare(
             }
         }
     }
-    classpath.push(client_path.clone());
+    classpath.push(launch_client);
     job.stage("Checking library metadata", 0);
     let dependencies = stream::iter(files)
         .map(|file| resolve_file(client, file))
@@ -1109,7 +1132,10 @@ impl Prepared {
             values.insert("path", file.display().to_string());
             jvm.push(argument.clone());
         }
-        let mut game_args = if let Some(arguments) = &self.base.arguments {
+        let legacy_loader_args = self.profile.as_ref().and_then(|profile| profile.minecraft_arguments.as_deref());
+        let mut game_args = if let Some(arguments) = legacy_loader_args {
+            arguments.split_whitespace().map(str::to_owned).collect()
+        } else if let Some(arguments) = &self.base.arguments {
             args(&arguments.game, &platform)
         } else {
             self.base

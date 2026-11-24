@@ -166,6 +166,7 @@ pub struct ContentFile {
     pub url: String,
     pub hash: Hash,
     pub size: Option<u64>,
+    pub icon_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -183,6 +184,16 @@ pub struct ModFile {
     pub side: crate::mod_sides::ModSide,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModVersionChoice {
+    id: String,
+    label: String,
+    date: String,
+    channel: &'static str,
+    changelog: Option<String>,
+}
+
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Dependency {
     pub project: Option<String>,
@@ -194,6 +205,7 @@ pub struct Dependency {
 pub trait Provider: Send + Sync {
     async fn search(&self, query: &str, filters: &Filters, offset: u32) -> Result<Vec<Project>>;
     async fn details(&self, project: &str) -> Result<ProjectDetails>;
+    async fn mod_versions(&self, project: &str, target: &InstanceOptions) -> Result<Vec<ModVersionChoice>>;
     async fn file(
         &self,
         project: Option<&str>,
@@ -407,6 +419,8 @@ pub async fn modrinth_updates(
 #[serde(rename_all = "camelCase")]
 pub struct ModrinthArtwork {
     pub project: String,
+    #[serde(default)]
+    pub version: String,
     pub title: String,
     pub icon_url: Option<String>,
     pub display_version: Option<String>,
@@ -418,6 +432,7 @@ pub async fn modrinth_artwork(
 ) -> Result<HashMap<String, ModrinthArtwork>> {
     #[derive(Deserialize)]
     struct Version {
+        id: String,
         project_id: String,
         version_number: Option<String>,
     }
@@ -427,6 +442,8 @@ pub async fn modrinth_artwork(
         id: String,
         title: String,
         icon_url: Option<String>,
+        #[serde(default)]
+        gallery: Vec<MrGalleryImage>,
     }
 
     let mut versions = HashMap::new();
@@ -459,8 +476,10 @@ pub async fn modrinth_artwork(
                 hash,
                 ModrinthArtwork {
                     project: version.project_id,
+                    version: version.id,
                     title: project.title.clone(),
-                    icon_url: project.icon_url.clone(),
+                    icon_url: project.icon_url.as_deref().and_then(|url| gallery_url(Platform::Modrinth, url))
+                        .or_else(|| project.gallery.iter().find_map(|image| gallery_url(Platform::Modrinth, &image.url))),
                     display_version: version.version_number,
                 },
             ))
@@ -520,6 +539,7 @@ struct MrVersion {
     project_id: String,
     version_type: String,
     version_number: Option<String>,
+    changelog: Option<String>,
     date_published: String,
     environment: Option<String>,
     game_versions: Vec<String>,
@@ -552,6 +572,26 @@ struct MrDependency {
 
 #[async_trait]
 impl Provider for Modrinth {
+    async fn mod_versions(&self, project: &str, target: &InstanceOptions) -> Result<Vec<ModVersionChoice>> {
+        check_id(project)?;
+        let mut versions: Vec<MrVersion> = json(
+            self.0.get(format!("{MR}/project/{project}/version")).query(&[
+                ("loaders", serde_json::to_string(&[target.loader.as_str()])?),
+                ("game_versions", serde_json::to_string(&[&target.minecraft_version])?),
+            ]),
+            "Modrinth",
+        ).await?;
+        versions.sort_by(|a, b| b.date_published.cmp(&a.date_published));
+        Ok(versions.into_iter().filter(|version| version.files.iter().any(|file| file.filename.to_ascii_lowercase().ends_with(".jar")))
+            .map(|version| ModVersionChoice {
+                channel: match version.version_type.as_str() { "release" => "Release", "beta" => "Beta", _ => "Alpha" },
+                label: version.version_number.unwrap_or_else(|| version.id.clone()),
+                date: version.date_published,
+                id: version.id,
+                changelog: version.changelog,
+            }).collect())
+    }
+
     async fn search(&self, query: &str, filters: &Filters, offset: u32) -> Result<Vec<Project>> {
         let mut facets = vec![vec![format!("project_type:{}", filters.kind.tag())]];
         if filters.kind == Kind::Mod {
@@ -791,6 +831,7 @@ impl Provider for Modrinth {
             url: file.url.clone(),
             hash: Hash::Sha512(file.hashes.sha512.clone()),
             size: Some(file.size),
+            icon_url: None,
         })
     }
 }
@@ -912,6 +953,23 @@ fn cf_loader(loader: Loader) -> Option<&'static str> {
 
 #[async_trait]
 impl Provider for CurseForge {
+    async fn mod_versions(&self, project: &str, target: &InstanceOptions) -> Result<Vec<ModVersionChoice>> {
+        let project = project.parse::<u64>()?;
+        let loader = cf_loader(target.loader).context("Mods need a supported mod loader.")?;
+        let mut response: CfResponse<Vec<CfFile>> = json(self.get(&format!("mods/{project}/files")).query(&[
+            ("gameVersion", target.minecraft_version.as_str()), ("modLoaderType", loader), ("pageSize", "50"),
+        ]), "CurseForge").await?;
+        response.data.sort_by(|a, b| b.file_date.cmp(&a.file_date));
+        Ok(response.data.into_iter().filter(|file| file.file_name.to_ascii_lowercase().ends_with(".jar"))
+            .map(|file| ModVersionChoice {
+                id: file.id.to_string(),
+                label: file.display_name.unwrap_or(file.file_name),
+                date: file.file_date,
+                channel: match file.release_type { 1 => "Release", 2 => "Beta", _ => "Alpha" },
+                changelog: None,
+            }).collect())
+    }
+
     async fn search(&self, query: &str, filters: &Filters, offset: u32) -> Result<Vec<Project>> {
         let offset = offset.to_string();
         let limit = filters.limit.to_string();
@@ -1157,8 +1215,19 @@ impl Provider for CurseForge {
             url,
             hash: Hash::Sha1(hash.value),
             size: Some(file.file_length),
+            icon_url: project.data.logo.and_then(|logo| logo.thumbnail_url.or(logo.url))
+                .and_then(|url| gallery_url(Platform::Curseforge, &url)),
         })
     }
+}
+
+pub async fn curseforge_changelog(private_client: &Client, project: &str, version: &str) -> Result<String> {
+    let project = project.parse::<u64>()?;
+    let version = version.parse::<u64>()?;
+    let key = tokio::task::spawn_blocking(get_key).await??.context("Add an authorized CurseForge API key in Settings.")?;
+    let source = CurseForge { client: private_client.clone(), key };
+    let result: CfResponse<String> = json(source.get(&format!("mods/{project}/files/{version}/changelog")), "CurseForge").await?;
+    Ok(result.data)
 }
 
 async fn json<T: DeserializeOwned>(request: RequestBuilder, platform: &str) -> Result<T> {

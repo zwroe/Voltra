@@ -1,8 +1,10 @@
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 use uuid::Uuid;
 
@@ -43,20 +45,42 @@ pub struct Entry {
     name: String,
     directory: bool,
     added_at: Option<u64>,
+    icon_url: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct PackIcon {
+    url: String,
+    bytes: u64,
+    modified: SystemTime,
+}
+
+fn stored_icons(path: &Path) -> HashMap<String, PackIcon> {
+    regular_file(path).ok().and_then(|_| crate::storage::read_json(path).ok()).unwrap_or_default()
+}
+
+pub fn save_icon(store: &Store, id: Uuid, folder: &str, target: &Path, url: String) -> Result<()> {
+    let name = target.file_name().and_then(|name| name.to_str()).context("Invalid pack filename.")?;
+    let metadata = fs::symlink_metadata(target)?;
+    let path = store.instance_dir(id).join(format!("{folder}-icons.json"));
+    let mut icons = stored_icons(&path);
+    icons.insert(name.to_owned(), PackIcon { bytes: metadata.len(), modified: metadata.modified()?, url });
+    crate::storage::atomic_json(&path, &icons)
 }
 
 pub fn list(store: &Store, id: Uuid, kind: Kind) -> Result<Vec<Entry>> {
     let folder = kind.directory(store, id)?;
+    let icons = stored_icons(&store.instance_dir(id).join(format!("{}-icons.json", kind.folder())));
     let mut entries: Vec<Entry> = list_files(&folder)?
         .into_iter()
         .filter(|name| is_zip(name))
-        .map(|name| Entry {
-            added_at: fs::symlink_metadata(folder.join(&name))
-                .ok()
-                .as_ref()
-                .and_then(file_added_at),
-            name,
-            directory: false,
+        .map(|name| {
+            let metadata = fs::symlink_metadata(folder.join(&name)).ok();
+            let icon_url = icons.get(&name).and_then(|icon| {
+                let metadata = metadata.as_ref()?;
+                (icon.bytes == metadata.len() && metadata.modified().ok() == Some(icon.modified)).then(|| icon.url.clone())
+            });
+            Entry { added_at: metadata.as_ref().and_then(file_added_at), name, directory: false, icon_url }
         })
         .collect();
     if folder.exists() {
@@ -74,6 +98,7 @@ pub fn list(store: &Store, id: Uuid, kind: Kind) -> Result<Vec<Entry>> {
                         name,
                         directory: true,
                         added_at: entry.metadata().ok().as_ref().and_then(file_added_at),
+                        icon_url: None,
                     });
                 }
             }
@@ -122,16 +147,24 @@ pub fn add(store: &Store, id: Uuid, kind: Kind, source: &Path) -> Result<()> {
 }
 
 pub fn remove(store: &Store, id: Uuid, kind: Kind, name: &str) -> Result<()> {
-    check_filename(name)?;
+    let packs = removal_paths(store, id, kind, &[name.to_owned()])?;
+    crate::mods::remove_selected(store, id, &[], packs)
+}
+
+pub fn removal_paths(store: &Store, id: Uuid, kind: Kind, names: &[String]) -> Result<Vec<PathBuf>> {
+    let mut names = names.to_owned();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() { return Ok(Vec::new()); }
     let folder = kind.directory(store, id)?;
     check_directory(&folder)?;
-    let file = folder.join(name);
-    if !is_zip(name) || regular_file(&file).is_err() {
-        bail!("Only ZIP packs can be removed here. Open the pack folder to manage folders.");
+    for name in &names {
+        check_filename(name)?;
+        if !is_zip(name) || regular_file(&folder.join(name)).is_err() {
+            bail!("Only ZIP packs can be removed here. Open the pack folder to manage folders.");
+        }
     }
-    store.snapshot_content(id)?;
-    fs::remove_file(file).context("Removing the pack")?;
-    Ok(())
+    Ok(names.into_iter().map(|name| folder.join(name)).collect())
 }
 
 fn is_zip(name: &str) -> bool {

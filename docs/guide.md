@@ -1,6 +1,6 @@
 # Voltra guide
 
-Voltra is a local-first Minecraft Java Edition desktop launcher for Windows. Tauri hosts the React interface, and Rust manages game files, credentials, downloads, and Java processes. Source is licensed under MIT.
+Voltra is a local-first Minecraft Java Edition desktop launcher for Windows, macOS, and Linux. Tauri hosts the React interface, and Rust manages game files, credentials, downloads, and Java processes. Source is licensed under MIT.
 
 ## Build on Windows
 
@@ -24,17 +24,17 @@ Run the production bundle and checks with:
 ```powershell
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
-npm run tauri build
+npm run tauri -- build --bundles nsis
 ```
 
-The Windows installer is produced in `src-tauri/target/release/bundle/nsis/` after a successful bundle. Use `npm run tauri -- build --no-bundle` for `src-tauri/target/release/voltra.exe`. CI checks the React build, Rust unit tests, and native Tauri build on Windows.
+The Windows installer is produced in `src-tauri/target/release/bundle/nsis/` after a successful bundle. Use `npm run tauri -- build --no-bundle` for `src-tauri/target/release/voltra.exe`. CI checks the React build, Rust unit tests, and native Tauri build on Windows, macOS, and Linux.
 
 Open `releases/voltra.exe` to run the current local release. Its published source ZIP is next to it, and older builds and archives are in `releases/archive/`. Cargo keeps build output in `src-tauri/target/`.
 
 ## Prepare and play
 
 1. Select **Library → New instance**. Enter a name, choose a Minecraft release and mod loader, and set the RAM limit.
-2. Use **Prepare files** in the instance overview to fetch Minecraft and any required runtime without signing in. Voltra detects the exact required Java major version and downloads a SHA-256-verified Windows Temurin distribution if needed.
+2. Use **Prepare files** in the instance overview to fetch Minecraft and any required runtime without signing in. Voltra detects the exact required Java major version and downloads a SHA-256-verified Eclipse Temurin runtime for your system if needed. If Temurin does not offer that Java version for your architecture, set a local Java path in instance settings.
 3. Select **Connect Microsoft account** and authorize Voltra in your browser. A build with an approved Voltra client ID configured opens the authorization page directly.
 4. Select **Play Minecraft**. The Downloads page shows preparation progress. Check **Diagnostics** for console output, crash reports, and live Java CPU and resident memory readings.
 
@@ -64,7 +64,7 @@ Vanilla uses Mojang’s version manifest. Fabric and Quilt use their official la
 
 Voltra uses the OS local application data directory. Find its exact path in **Settings → Downloads and storage**. Instance settings, account metadata, and mod records use atomic JSON replacement. Each game uses its own `.minecraft` directory. Downloads go to a shared cache or the target instance. App and game console logs go in `logs/`.
 
-**History → Pack snapshots** shows snapshots created before mod changes. Snapshots include mod metadata, JARs, config, resource and shader packs, data packs, known script directories, and game options. Compare any two snapshots or compare with current files by SHA-256. Restoring a pack creates a safety snapshot and leaves worlds in place. **Library → Backups** holds full instance backups and archives. An explicit full backup restore can replace worlds, so read the confirmation before proceeding.
+**History → Pack snapshots** shows snapshots created before changes such as mod updates and removals. Snapshots include mod metadata, JARs, config, resource and shader packs, data packs, known script directories, and game options. Compare any two snapshots or compare with current files by SHA-256. Restoring a pack creates a safety snapshot and leaves worlds in place. **Library → Backups** holds full instance backups and archives. An explicit full backup restore can replace worlds, so read the confirmation before proceeding.
 
 Set the per-pack snapshot count and size budget in **Settings**. **History → Review retention** previews snapshots over budget and asks for confirmation before removing them. The latest snapshot is always kept. Managed downloads share a checksum-keyed cache. Installed JARs remain independent writable copies, so editing a file outside Voltra cannot alter another instance or a cached download.
 

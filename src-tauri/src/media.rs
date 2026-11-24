@@ -130,6 +130,8 @@ fn saved_skins(store: &Store) -> Result<Vec<Skin>> {
     read_default(&store.root.join("config/skins.json"))
 }
 
+static SKIN_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn import_skin(store: &Store, path: &Path, variant: Variant) -> Result<Skin> {
     regular_file(path)?;
     let bytes = read_limited(path, 1024 * 1024)?;
@@ -157,10 +159,15 @@ pub fn import_skin(store: &Store, path: &Path, variant: Variant) -> Result<Skin>
     let directory = store.root.join("skins");
     fs::create_dir_all(&directory)?;
     check_directory(&directory)?;
-    fs::write(directory.join(format!("{id}.png")), bytes)?;
+    let _guard = SKIN_WRITES.lock().expect("skin writes lock");
     let mut saved = saved_skins(store)?;
+    let file = directory.join(format!("{id}.png"));
+    fs::write(&file, bytes)?;
     saved.insert(0, skin.clone());
-    atomic_json(&store.root.join("config/skins.json"), &saved)?;
+    if let Err(error) = atomic_json(&store.root.join("config/skins.json"), &saved) {
+        let _ = fs::remove_file(file);
+        return Err(error);
+    }
     Ok(skin)
 }
 
@@ -182,6 +189,17 @@ pub fn skin_bytes(store: &Store, id: &str) -> Result<(Skin, Vec<u8>)> {
     };
     skin_height(&bytes)?;
     Ok((skin, bytes))
+}
+
+pub fn set_skin_variant(store: &Store, id: &str, variant: Variant) -> Result<Skin> {
+    let _guard = SKIN_WRITES.lock().expect("skin writes lock");
+    let mut saved = saved_skins(store)?;
+    let skin = saved.iter_mut().find(|skin| skin.id == id).context("Imported skin not found.")?;
+    ensure!(skin.height == 64 || !matches!(variant, Variant::Slim), "Legacy 64x32 skins require classic arms.");
+    skin.variant = variant;
+    let updated = skin.clone();
+    atomic_json(&store.root.join("config/skins.json"), &saved)?;
+    Ok(updated)
 }
 
 pub fn worlds(store: &Store, id: Uuid) -> Result<Vec<String>> {
@@ -222,7 +240,7 @@ fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-fn skin_height(bytes: &[u8]) -> Result<u32> {
+pub(crate) fn skin_height(bytes: &[u8]) -> Result<u32> {
     let image = png::Decoder::new(std::io::Cursor::new(bytes))
         .read_info()
         .context("Choose a valid PNG skin.")?;

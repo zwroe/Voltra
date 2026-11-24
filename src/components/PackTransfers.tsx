@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useState } from "react";
 import { call, errorText, platformNames, type Instance, type Project } from "../api";
 import { runAction, useLauncher } from "../store";
@@ -33,9 +34,9 @@ export function ComparePacks({ id, locked }: { id: string; locked: boolean }) {
     finally { setBusy(false); }
   }
   return <section className="panel detail-panel"><h2>Compare and merge packs</h2>
-    {others.length ? <><label>Source instance<select value={source} onChange={(event) => { setSource(event.target.value); setCompare(false); select(new Set()); }}>
+    {others.length ? <><label>Source instance<Select value={source} onValueChange={(value) => { setSource(value); setCompare(false); select(new Set()); }}>
       <option value="">Select another pack</option>{others.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.minecraftVersion}</option>)}
-    </select></label><Button disabled={!source} onClick={() => { if (compare) diff.refresh(); select(new Set()); setCompare(true); }}>Compare files</Button>
+    </Select></label><Button disabled={!source} onClick={() => { if (compare) diff.refresh(); select(new Set()); setCompare(true); }}>Compare files</Button>
       <ReadState query={diff} label="Comparing pack checksums…" />{diff.value && <>
         <label>Filter file paths<input value={filter} onChange={(event) => { setFilter(event.target.value); setLimit(100); }} /></label>
         <PackDifferences changes={matching.slice(0, limit)} selections={selected} onSelect={(path) => select((before) => {

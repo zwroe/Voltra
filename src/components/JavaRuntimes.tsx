@@ -1,3 +1,4 @@
+import { Select } from "./ui/select";
 import { useEffect, useState } from "react";
 import { Coffee, Download } from "lucide-react";
 import { call, errorText } from "../api";
@@ -23,10 +24,10 @@ export function JavaRuntimes() {
   return <section className="java-runtimes">
     <div><Coffee size={17} /><strong>Download a Java runtime</strong></div>
     <div className="actions-wrap">
-      <select aria-label="Java release" value={choices.includes(major) ? major : choices[0]}
-        onChange={(event) => setMajor(Number(event.target.value))}>
+      <Select aria-label="Java release" value={choices.includes(major) ? major : choices[0]}
+        onValueChange={(value) => setMajor(Number(value))}>
         {choices.map((version) => <option value={version} key={version}>Java {version}</option>)}
-      </select>
+      </Select>
       <Button disabled={installing} onClick={() => {
         setInstalling(true);
         void runAction(async () => {

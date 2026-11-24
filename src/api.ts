@@ -47,7 +47,7 @@ export interface Settings {
   jvmArgs?: string[];
   environment?: EnvironmentVariable[];
 }
-export interface Account { id: string; name: string; skinUrl?: string; skinChoice?: string }
+export interface Account { id: string; name: string; skinUrl?: string; skinChoice?: string; skinVariant?: SkinVariant }
 export interface Accounts { accounts: Account[]; activeId: string | null }
 export interface Cape { id: string; name: string; url: string; active: boolean }
 export interface QuickTarget { kind: "world" | "server"; id: string }
@@ -180,6 +180,7 @@ export interface InstalledMod {
 }
 export interface ModrinthArtwork {
   project: string;
+  version: string;
   title: string;
   iconUrl: string | null;
   displayVersion: string | null;
